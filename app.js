@@ -1,21 +1,21 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, doc, getDoc, setDoc, runTransaction, addDoc, collection, query, orderBy, limit, getDocs, serverTimestamp }
+import { getFirestore, doc, getDoc, collection, query, orderBy, limit, getDocs }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFunctions, httpsCallable }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 import { firebaseConfig } from "./firebase-config.js";
-import { REWARDS, BINS } from "./store.js";
-
-if (!firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith("YOUR_")) {
-  document.addEventListener("DOMContentLoaded", () => {
-    const error = document.getElementById("auth-error");
-    if (error) error.textContent = "firebase-config.js still has placeholder values. Paste your real config and save the file.";
-  });
-}
+import { REWARDS } from "./store.js";
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const functions = getFunctions(app, "europe-west2");
+
+const ensureAccount = httpsCallable(functions, "ensureAccount");
+const claimBin = httpsCallable(functions, "claimBin");
+const redeemRewardCall = httpsCallable(functions, "redeemReward");
 
 /* ---- Settings ---- */
 const $ = id => document.getElementById(id);
@@ -45,15 +45,8 @@ $("auth-form").addEventListener("submit", async event => {
 
   try {
     if (mode === "signup") {
-      const credential = await createUserWithEmailAndPassword(auth, email, password);
-      await setDoc(doc(db, "users", credential.user.uid), {
-        email,
-        points: 0,
-        lifetime: 0,
-        items: 0,
-        lastClaimId: "",
-        createdAt: serverTimestamp()
-      });
+      await createUserWithEmailAndPassword(auth, email, password);
+      // The authenticated session creates its profile through ensureAccount().
     } else {
       await signInWithEmailAndPassword(auth, email, password);
     }
@@ -72,12 +65,27 @@ function friendly(error) {
   if (code.includes("weak-password")) return "Password must be at least 6 characters.";
   if (code.includes("invalid-email")) return "Please enter a valid email.";
   if (code.includes("too-many-requests")) return "Too many attempts. Try again later.";
-  if (code.includes("api-key") || code.includes("invalid-api")) return "Firebase rejected the API key (" + code + "). Re-copy apiKey from Project settings > Your apps, and check its restrictions in Google Cloud > Credentials.";
+  if (code.includes("api-key") || code.includes("invalid-api")) return "Firebase rejected the API key. Check firebase-config.js and the API key restrictions.";
   if (code.includes("configuration-not-found") || code.includes("operation-not-allowed")) return "Email/Password sign-in isn't enabled. Firebase console > Authentication > Sign-in method > Email/Password > Enable.";
   if (code.includes("unauthorized-domain")) return "This domain isn't allowed. Firebase console > Authentication > Settings > Authorized domains > add it.";
   if (code.includes("network-request-failed")) return "Couldn't reach Firebase. Check your connection.";
 
-  return (code ? code + ": " : "") + (error.message || "Something went wrong.");
+  return error.message || (code ? code + ": Something went wrong." : "Something went wrong.");
+}
+
+function backendMessage(error) {
+  const code = error.code || "";
+
+  if (code.includes("unauthenticated")) return "Please log in again before doing that.";
+  if (code.includes("not-found")) return "That bin code isn't registered. Please ask for a valid SmartBin QR code.";
+  if (code.includes("already-exists")) return "You've already claimed this bin code.";
+  if (code.includes("resource-exhausted")) return error.message || "Please wait before scanning again.";
+  if (code.includes("failed-precondition")) return error.message || "This action can't be completed right now.";
+  if (code.includes("invalid-argument")) return error.message || "That QR code isn't a valid SmartBin code.";
+  if (code.includes("permission-denied")) return "Firebase denied this action. Check that the latest backend and Firestore rules have been deployed.";
+  if (code.includes("unavailable") || code.includes("not-found")) return error.message || "The SmartBin server isn't available yet. Try again shortly.";
+
+  return error.message || "Something went wrong. Please try again.";
 }
 
 /* ---- Session ---- */
@@ -90,13 +98,14 @@ onAuthStateChanged(auth, async authenticatedUser => {
   if (user) {
     $("user-email").textContent = user.email || "";
     try {
+      await ensureAccount();
       await loadUser();
       renderRewards();
       render();
       await loadHistory();
     } catch (error) {
-      console.error("Could not load account:", error);
-      msg("log-msg", "Couldn't load your account. Check your connection and refresh.", true);
+      console.error("Could not initialise account:", error);
+      msg("log-msg", backendMessage(error), true);
     }
   } else {
     data = null;
@@ -106,17 +115,10 @@ onAuthStateChanged(auth, async authenticatedUser => {
 
 async function loadUser() {
   const userRef = doc(db, "users", user.uid);
-  let snapshot = await getDoc(userRef);
+  const snapshot = await getDoc(userRef);
 
   if (!snapshot.exists()) {
-    await setDoc(userRef, {
-      email: user.email,
-      points: 0,
-      lifetime: 0,
-      items: 0,
-      lastClaimId: ""
-    });
-    snapshot = await getDoc(userRef);
+    throw new Error("Your account profile hasn't been created yet. Log out and back in.");
   }
 
   data = snapshot.data();
@@ -164,146 +166,36 @@ function msg(id, message, isError = false) {
   element.className = "msg" + (isError ? " err" : "");
 }
 
-/* ---- QR validation and claiming ----
-   QR payload format:
-   {"app":"smartbin","code":"BIN-0001","points":10}
-
-   The QR must contain exactly these three fields. The registered point
-   value in store.js is authoritative; the QR's points value must match it.
-*/
-function parseSmartBinQR(rawText) {
-  let payload;
-
-  try {
-    payload = JSON.parse(rawText);
-  } catch {
-    return { ok: false, reason: "This isn't a valid SmartBin QR code." };
-  }
-
-  if (
-    payload === null ||
-    typeof payload !== "object" ||
-    Array.isArray(payload)
-  ) {
-    return { ok: false, reason: "This isn't a SmartBin QR code." };
-  }
-
-  const actualKeys = Object.keys(payload).sort();
-  const requiredKeys = ["app", "code", "points"];
-
-  if (
-    actualKeys.length !== requiredKeys.length ||
-    requiredKeys.some((key, index) => actualKeys[index] !== key)
-  ) {
-    return { ok: false, reason: "SmartBin QR codes must contain exactly app, code and points." };
-  }
-
-  if (payload.app !== "smartbin") {
-    return { ok: false, reason: "This QR code belongs to a different app." };
-  }
-
-  if (typeof payload.code !== "string" || !/^BIN-\d{4}$/.test(payload.code)) {
-    return { ok: false, reason: "The bin code format is invalid." };
-  }
-
-  if (!Number.isSafeInteger(payload.points) || payload.points < 1 || payload.points > 100) {
-    return { ok: false, reason: "The points value in this QR code is invalid." };
-  }
-
-  const bin = BINS[payload.code];
-  if (!bin) {
-    return { ok: false, reason: 'Bin "' + payload.code + '" is not registered in store.js.' };
-  }
-
-  const registeredPoints = Number(bin.points);
-  if (!Number.isSafeInteger(registeredPoints) || registeredPoints < 1 || registeredPoints > 100) {
-    return { ok: false, reason: 'Bin "' + payload.code + '" has an invalid points setting in store.js.' };
-  }
-
-  if (payload.points !== registeredPoints) {
-    return { ok: false, reason: "The points in this QR code don't match the registered bin. Please ask for a replacement QR code." };
-  }
-
-  return {
-    ok: true,
-    code: payload.code,
-    points: registeredPoints,
-    cooldownMinutes: Math.max(0, Number(bin.cooldownMinutes) || 0)
-  };
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, character => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[character]);
 }
 
+/* ---- QR claiming ----
+   The server parses and validates the complete QR payload.
+   Never award points in this browser file.
+*/
 async function claimCode(rawText) {
-  const parsed = parseSmartBinQR(rawText);
-
-  if (!parsed.ok) {
-    msg("log-msg", parsed.reason, true);
-    return;
-  }
-
   if (!user) {
     stopScan();
     msg("log-msg", "Please log in before scanning a bin.", true);
     return;
   }
 
-  const code = parsed.code;
-  const pointsToAward = parsed.points;
-  const cooldownMinutes = parsed.cooldownMinutes;
-  const userRef = doc(db, "users", user.uid);
-
   try {
-    await runTransaction(db, async transaction => {
-      const snapshot = await transaction.get(userRef);
-
-      if (!snapshot.exists()) {
-        throw new Error("Your account record is missing. Log out and back in.");
-      }
-
-      const account = snapshot.data();
-      const previousScan = (account.binScans || {})[code] || 0;
-      const remainingMs = previousScan + cooldownMinutes * 60000 - Date.now();
-
-      if (remainingMs > 0) {
-        const wait = remainingMs > 3600000
-          ? Math.ceil(remainingMs / 3600000) + " h"
-          : remainingMs > 60000
-            ? Math.ceil(remainingMs / 60000) + " min"
-            : Math.ceil(remainingMs / 1000) + " s";
-
-        throw new Error("You've scanned this bin recently. Try again in " + wait + ".");
-      }
-
-      const lastAnyScan = account.lastScanAt && account.lastScanAt.toMillis
-        ? account.lastScanAt.toMillis()
-        : 0;
-
-      if (Date.now() - lastAnyScan < 12000) {
-        throw new Error("Slow down! Wait a few seconds between scans.");
-      }
-
-      transaction.update(userRef, {
-        points: Number(account.points || 0) + pointsToAward,
-        lifetime: Number(account.lifetime || 0) + pointsToAward,
-        items: Number(account.items || 0) + 1,
-        binScans: { ...(account.binScans || {}), [code]: Date.now() },
-        lastScanAt: serverTimestamp()
-      });
-    });
-
-    const freshSnapshot = await getDoc(userRef);
-    data = freshSnapshot.data();
-
+    const result = await claimBin({ rawText });
+    await loadUser();
     stopScan();
-    msg("log-msg", "+" + pointsToAward + " points added. Thanks for keeping it clean! 🌍");
+    msg("log-msg", "+" + result.data.points + " points added. Thanks for keeping it clean! 🌍");
   } catch (error) {
     stopScan();
     console.error("Scan failed:", error);
-
-    const message = error.code === "permission-denied"
-      ? "Firestore refused the update (permission-denied). Check that your latest firestore.rules are published in Firebase."
-      : (error.code ? error.code + ": " : "") + (error.message || "Something went wrong.");
-
-    msg("log-msg", message, true);
+    msg("log-msg", backendMessage(error), true);
   }
 
   render();
@@ -333,9 +225,7 @@ async function decodeFrame(source, width, height) {
   if (detector) {
     try {
       const results = await detector.detect(source);
-      if (results.length > 0 && results[0].rawValue) {
-        return results[0].rawValue;
-      }
+      if (results.length > 0 && results[0].rawValue) return results[0].rawValue;
     } catch (error) {
       console.warn("Native QR detection failed; trying jsQR:", error);
     }
@@ -377,9 +267,7 @@ async function scanLoop() {
     }
   }
 
-  if (scanning) {
-    setTimeout(() => requestAnimationFrame(scanLoop), 150);
-  }
+  if (scanning) setTimeout(() => requestAnimationFrame(scanLoop), 150);
 }
 
 async function openCamera() {
@@ -389,11 +277,7 @@ async function openCamera() {
       audio: false
     });
   } catch (error) {
-    if (error.name !== "OverconstrainedError" && error.name !== "NotFoundError") {
-      throw error;
-    }
-
-    // Some Chromebooks and webcams do not expose a rear-facing camera.
+    if (error.name !== "OverconstrainedError" && error.name !== "NotFoundError") throw error;
     return navigator.mediaDevices.getUserMedia({ video: true, audio: false });
   }
 }
@@ -455,7 +339,6 @@ function stopScan() {
   }
 
   if (video) video.srcObject = null;
-
   if ($("scanner")) $("scanner").hidden = true;
   if ($("scan-start")) $("scan-start").hidden = false;
   if ($("scan-stop")) $("scan-stop").hidden = true;
@@ -466,43 +349,16 @@ $("scan-stop").onclick = stopScan;
 
 /* ---- Rewards ---- */
 async function redeem(id) {
-  const reward = REWARDS.find(item => item.id === id);
-  if (!reward || !user) return;
-
-  const userRef = doc(db, "users", user.uid);
+  if (!user) return;
 
   try {
-    data = await runTransaction(db, async transaction => {
-      const snapshot = await transaction.get(userRef);
-      if (!snapshot.exists()) throw new Error("Your account record is missing.");
-
-      const account = snapshot.data();
-      if (Number(account.points || 0) < reward.cost) {
-        throw new Error("Not enough points yet.");
-      }
-
-      const nextAccount = {
-        ...account,
-        points: Number(account.points || 0) - reward.cost
-      };
-
-      transaction.update(userRef, { points: nextAccount.points });
-      return nextAccount;
-    });
-
-    await addDoc(collection(db, "users", user.uid, "redemptions"), {
-      rewardId: reward.id,
-      email: user.email,
-      reward: reward.name,
-      cost: reward.cost,
-      status: "pending",
-      createdAt: serverTimestamp()
-    });
-
-    msg("reward-msg", "Redeemed: " + reward.name + "! We'll email your reward soon.");
+    const result = await redeemRewardCall({ rewardId: id });
+    await loadUser();
+    msg("reward-msg", "Redeemed: " + result.data.reward + "! We'll email your reward soon.");
     await loadHistory();
   } catch (error) {
-    msg("reward-msg", error.message || "Couldn't redeem that reward.", true);
+    console.error("Redemption failed:", error);
+    msg("reward-msg", backendMessage(error), true);
   }
 
   render();
@@ -521,8 +377,8 @@ async function loadHistory() {
     ? '<li class="muted">Nothing yet.</li>'
     : snapshot.docs.map(document => {
         const reward = document.data();
-        return '<li><span>' + reward.reward + '</span><span class="muted">' +
-          Number(reward.cost || 0).toLocaleString() + ' pts · ' + reward.status +
+        return '<li><span>' + escapeHtml(reward.reward) + '</span><span class="muted">' +
+          Number(reward.cost || 0).toLocaleString() + ' pts · ' + escapeHtml(reward.status) +
           '</span></li>';
       }).join("");
 }
