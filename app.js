@@ -8,220 +8,521 @@ import { REWARDS, BINS } from "./store.js";
 
 if (!firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith("YOUR_")) {
   document.addEventListener("DOMContentLoaded", () => {
-    document.getElementById("auth-error").textContent = "firebase-config.js still has placeholder values. Paste your real config and save the file.";
+    const error = document.getElementById("auth-error");
+    if (error) error.textContent = "firebase-config.js still has placeholder values. Paste your real config and save the file.";
   });
 }
+
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
 /* ---- Settings ---- */
 const $ = id => document.getElementById(id);
-let mode = "login", user = null, data = null;
+let mode = "login";
+let user = null;
+let data = null;
 
 /* ---- Auth UI ---- */
-function setMode(m) {
-  mode = m;
-  $("tab-login").classList.toggle("active", m === "login");
-  $("tab-signup").classList.toggle("active", m === "signup");
-  $("auth-submit").textContent = m === "login" ? "Log in" : "Create account";
-  $("password").autocomplete = m === "login" ? "current-password" : "new-password";
+function setMode(nextMode) {
+  mode = nextMode;
+  $("tab-login").classList.toggle("active", mode === "login");
+  $("tab-signup").classList.toggle("active", mode === "signup");
+  $("auth-submit").textContent = mode === "login" ? "Log in" : "Create account";
+  $("password").autocomplete = mode === "login" ? "current-password" : "new-password";
   $("auth-error").textContent = "";
 }
+
 $("tab-login").onclick = () => setMode("login");
 $("tab-signup").onclick = () => setMode("signup");
 
-$("auth-form").addEventListener("submit", async e => {
-  e.preventDefault();
+$("auth-form").addEventListener("submit", async event => {
+  event.preventDefault();
   $("auth-error").textContent = "";
-  const email = $("email").value.trim(), pw = $("password").value;
+
+  const email = $("email").value.trim();
+  const password = $("password").value;
+
   try {
     if (mode === "signup") {
-      const cred = await createUserWithEmailAndPassword(auth, email, pw);
-      await setDoc(doc(db, "users", cred.user.uid), {
-        email, points: 0, lifetime: 0, items: 0, lastClaimId: "",
+      const credential = await createUserWithEmailAndPassword(auth, email, password);
+      await setDoc(doc(db, "users", credential.user.uid), {
+        email,
+        points: 0,
+        lifetime: 0,
+        items: 0,
+        lastClaimId: "",
         createdAt: serverTimestamp()
       });
     } else {
-      await signInWithEmailAndPassword(auth, email, pw);
+      await signInWithEmailAndPassword(auth, email, password);
     }
-  } catch (err) {
-    $("auth-error").textContent = friendly(err);
+  } catch (error) {
+    $("auth-error").textContent = friendly(error);
   }
 });
+
 $("logout").onclick = () => signOut(auth);
 
-function friendly(err) {
-  const c = err.code || "";
-  if (c.includes("invalid-credential") || c.includes("wrong-password") || c.includes("user-not-found")) return "Incorrect email or password.";
-  if (c.includes("email-already-in-use")) return "That email already has an account – try logging in.";
-  if (c.includes("weak-password")) return "Password must be at least 6 characters.";
-  if (c.includes("invalid-email")) return "Please enter a valid email.";
-  if (c.includes("too-many-requests")) return "Too many attempts. Try again later.";
-  if (c.includes("api-key") || c.includes("invalid-api")) return "Firebase rejected the API key (" + c + "). Re-copy apiKey from Project settings > Your apps, and check its restrictions in Google Cloud > Credentials.";
-  if (c.includes("configuration-not-found") || c.includes("operation-not-allowed")) return "Email/Password sign-in isn't enabled. Firebase console > Authentication > Sign-in method > Email/Password > Enable.";
-  if (c.includes("unauthorized-domain")) return "This domain isn't allowed. Firebase console > Authentication > Settings > Authorized domains > add it.";
-  if (c.includes("network-request-failed")) return "Couldn't reach Firebase. Check your connection.";
-  return (c ? c + ": " : "") + (err.message || "Something went wrong.");
+function friendly(error) {
+  const code = error.code || "";
+
+  if (code.includes("invalid-credential") || code.includes("wrong-password") || code.includes("user-not-found")) return "Incorrect email or password.";
+  if (code.includes("email-already-in-use")) return "That email already has an account – try logging in.";
+  if (code.includes("weak-password")) return "Password must be at least 6 characters.";
+  if (code.includes("invalid-email")) return "Please enter a valid email.";
+  if (code.includes("too-many-requests")) return "Too many attempts. Try again later.";
+  if (code.includes("api-key") || code.includes("invalid-api")) return "Firebase rejected the API key (" + code + "). Re-copy apiKey from Project settings > Your apps, and check its restrictions in Google Cloud > Credentials.";
+  if (code.includes("configuration-not-found") || code.includes("operation-not-allowed")) return "Email/Password sign-in isn't enabled. Firebase console > Authentication > Sign-in method > Email/Password > Enable.";
+  if (code.includes("unauthorized-domain")) return "This domain isn't allowed. Firebase console > Authentication > Settings > Authorized domains > add it.";
+  if (code.includes("network-request-failed")) return "Couldn't reach Firebase. Check your connection.";
+
+  return (code ? code + ": " : "") + (error.message || "Something went wrong.");
 }
 
 /* ---- Session ---- */
-onAuthStateChanged(auth, async u => {
+onAuthStateChanged(auth, async authenticatedUser => {
   stopScan();
-  user = u;
-  $("auth-view").hidden = !!u;
-  $("app-view").hidden = !u;
-  if (u) {
-    $("user-email").textContent = u.email;
-    await loadUser();
-    renderRewards(); render(); loadHistory();
+  user = authenticatedUser;
+  $("auth-view").hidden = !!user;
+  $("app-view").hidden = !user;
+
+  if (user) {
+    $("user-email").textContent = user.email || "";
+    try {
+      await loadUser();
+      renderRewards();
+      render();
+      await loadHistory();
+    } catch (error) {
+      console.error("Could not load account:", error);
+      msg("log-msg", "Couldn't load your account. Check your connection and refresh.", true);
+    }
   } else {
+    data = null;
     $("auth-form").reset();
   }
 });
 
 async function loadUser() {
-  const ref = doc(db, "users", user.uid);
-  let snap = await getDoc(ref);
-  if (!snap.exists()) {
-    await setDoc(ref, { email: user.email, points: 0, lifetime: 0, items: 0, lastClaimId: "" });
-    snap = await getDoc(ref);
+  const userRef = doc(db, "users", user.uid);
+  let snapshot = await getDoc(userRef);
+
+  if (!snapshot.exists()) {
+    await setDoc(userRef, {
+      email: user.email,
+      points: 0,
+      lifetime: 0,
+      items: 0,
+      lastClaimId: ""
+    });
+    snapshot = await getDoc(userRef);
   }
-  data = snap.data();
+
+  data = snapshot.data();
 }
 
 /* ---- Render ---- */
 function render() {
-  $("points").textContent = data.points.toLocaleString();
-  $("items").textContent = data.items.toLocaleString();
-  $("lifetime").textContent = data.lifetime.toLocaleString();
-  document.querySelectorAll(".reward").forEach(r => {
-    const rw = REWARDS.find(x => x.id === r.dataset.id);
-    r.querySelector(".btn").disabled = data.points < rw.cost;
-    r.querySelector(".fill").style.width = Math.min(100, data.points / rw.cost * 100) + "%";
+  if (!data) return;
+
+  $("points").textContent = Number(data.points || 0).toLocaleString();
+  $("items").textContent = Number(data.items || 0).toLocaleString();
+  $("lifetime").textContent = Number(data.lifetime || 0).toLocaleString();
+
+  document.querySelectorAll(".reward").forEach(rewardElement => {
+    const reward = REWARDS.find(item => item.id === rewardElement.dataset.id);
+    if (!reward) return;
+
+    const button = rewardElement.querySelector(".btn");
+    const fill = rewardElement.querySelector(".fill");
+    button.disabled = Number(data.points || 0) < reward.cost;
+    fill.style.width = Math.min(100, Number(data.points || 0) / reward.cost * 100) + "%";
   });
 }
 
 function renderRewards() {
-  $("rewards").innerHTML = REWARDS.map(r =>
-    `<div class="reward" data-id="${r.id}"><div style="font-size:1.8rem">${r.emoji}</div><h3>${r.name}</h3>
-     <div class="cost">${r.cost.toLocaleString()} pts</div>
-     <div class="bar"><div class="fill" style="height:100%;background:var(--g)"></div></div>
-     <button class="btn" type="button">Redeem</button></div>`).join("");
-  document.querySelectorAll(".reward").forEach(el => el.querySelector(".btn").onclick = () => redeem(el.dataset.id));
+  $("rewards").innerHTML = REWARDS.map(reward =>
+    '<div class="reward" data-id="' + reward.id + '">' +
+      '<div style="font-size:1.8rem">' + reward.emoji + '</div>' +
+      '<h3>' + reward.name + '</h3>' +
+      '<div class="cost">' + reward.cost.toLocaleString() + ' pts</div>' +
+      '<div class="bar"><div class="fill" style="height:100%;background:var(--g)"></div></div>' +
+      '<button class="btn" type="button">Redeem</button>' +
+    '</div>'
+  ).join("");
+
+  document.querySelectorAll(".reward").forEach(element => {
+    element.querySelector(".btn").onclick = () => redeem(element.dataset.id);
+  });
 }
 
-function msg(id, text, err) { const el = $(id); el.textContent = text; el.className = "msg" + (err ? " err" : ""); }
+function msg(id, message, isError = false) {
+  const element = $(id);
+  if (!element) return;
+  element.textContent = message;
+  element.className = "msg" + (isError ? " err" : "");
+}
 
-/* ---- Actions ---- */
-/* ---- QR codes ----
-   A SmartBin QR code contains JSON like:  {"app":"smartbin","code":"BIN-0001","points":10}
-   The bin must be listed in store.js. Points awarded always come from store.js. */
-async function claimCode(raw) {
-  let p;
-  try { p = JSON.parse(raw); } catch { return msg("log-msg", "That QR code isn't a SmartBin code.", true); }
-  if (!p || p.app !== "smartbin" || typeof p.code !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(p.code))
-    return msg("log-msg", "That QR code isn't a SmartBin code.", true);
-  const bin = BINS[p.code];
-  if (!bin) return msg("log-msg", `Bin "${p.code}" isn't listed in store.js. Add it there and redeploy.`, true);
-  const pts = Math.min(100, Math.floor(Number(bin.points)));
-  if (!(pts > 0)) return msg("log-msg", `Bin "${p.code}" has no valid points value in store.js.`, true);
-  const cooldownMin = Math.max(0, Number(bin.cooldownMinutes) || 0);
-  const userRef = doc(db, "users", user.uid);
+/* ---- QR validation and claiming ----
+   QR payload format:
+   {"app":"smartbin","code":"BIN-0001","points":10}
+
+   The QR must contain exactly these three fields. The registered point
+   value in store.js is authoritative; the QR's points value must match it.
+*/
+function parseSmartBinQR(rawText) {
+  let payload;
+
   try {
-    await runTransaction(db, async tx => {
-      const us = await tx.get(userRef);
-      if (!us.exists()) throw new Error("Your account record is missing. Log out and back in.");
-      const d = us.data();
-      const last = (d.binScans || {})[p.code] || 0;
-      const waitMs = last + cooldownMin * 60000 - Date.now();
-      if (waitMs > 0) throw new Error(`You've scanned this bin recently. Try again in ${waitMs > 3600000 ? Math.ceil(waitMs / 3600000) + " h" : waitMs > 60000 ? Math.ceil(waitMs / 60000) + " min" : Math.ceil(waitMs / 1000) + " s"}.`);
-      const lastAny = d.lastScanAt && d.lastScanAt.toMillis ? d.lastScanAt.toMillis() : 0;
-      if (Date.now() - lastAny < 12000) throw new Error("Slow down! Wait a few seconds between scans.");
-      tx.update(userRef, {
-        points: (d.points || 0) + pts,
-        lifetime: (d.lifetime || 0) + pts,
-        items: (d.items || 0) + 1,
-        binScans: { ...(d.binScans || {}), [p.code]: Date.now() },
+    payload = JSON.parse(rawText);
+  } catch {
+    return { ok: false, reason: "This isn't a valid SmartBin QR code." };
+  }
+
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    return { ok: false, reason: "This isn't a SmartBin QR code." };
+  }
+
+  const actualKeys = Object.keys(payload).sort();
+  const requiredKeys = ["app", "code", "points"];
+
+  if (
+    actualKeys.length !== requiredKeys.length ||
+    requiredKeys.some((key, index) => actualKeys[index] !== key)
+  ) {
+    return { ok: false, reason: "SmartBin QR codes must contain exactly app, code and points." };
+  }
+
+  if (payload.app !== "smartbin") {
+    return { ok: false, reason: "This QR code belongs to a different app." };
+  }
+
+  if (typeof payload.code !== "string" || !/^BIN-\d{4}$/.test(payload.code)) {
+    return { ok: false, reason: "The bin code format is invalid." };
+  }
+
+  if (!Number.isSafeInteger(payload.points) || payload.points < 1 || payload.points > 100) {
+    return { ok: false, reason: "The points value in this QR code is invalid." };
+  }
+
+  const bin = BINS[payload.code];
+  if (!bin) {
+    return { ok: false, reason: 'Bin "' + payload.code + '" is not registered in store.js.' };
+  }
+
+  const registeredPoints = Number(bin.points);
+  if (!Number.isSafeInteger(registeredPoints) || registeredPoints < 1 || registeredPoints > 100) {
+    return { ok: false, reason: 'Bin "' + payload.code + '" has an invalid points setting in store.js.' };
+  }
+
+  if (payload.points !== registeredPoints) {
+    return { ok: false, reason: "The points in this QR code don't match the registered bin. Please ask for a replacement QR code." };
+  }
+
+  return {
+    ok: true,
+    code: payload.code,
+    points: registeredPoints,
+    cooldownMinutes: Math.max(0, Number(bin.cooldownMinutes) || 0)
+  };
+}
+
+async function claimCode(rawText) {
+  const parsed = parseSmartBinQR(rawText);
+
+  if (!parsed.ok) {
+    msg("log-msg", parsed.reason, true);
+    return;
+  }
+
+  if (!user) {
+    stopScan();
+    msg("log-msg", "Please log in before scanning a bin.", true);
+    return;
+  }
+
+  const code = parsed.code;
+  const pointsToAward = parsed.points;
+  const cooldownMinutes = parsed.cooldownMinutes;
+  const userRef = doc(db, "users", user.uid);
+
+  try {
+    await runTransaction(db, async transaction => {
+      const snapshot = await transaction.get(userRef);
+
+      if (!snapshot.exists()) {
+        throw new Error("Your account record is missing. Log out and back in.");
+      }
+
+      const account = snapshot.data();
+      const previousScan = (account.binScans || {})[code] || 0;
+      const remainingMs = previousScan + cooldownMinutes * 60000 - Date.now();
+
+      if (remainingMs > 0) {
+        const wait = remainingMs > 3600000
+          ? Math.ceil(remainingMs / 3600000) + " h"
+          : remainingMs > 60000
+            ? Math.ceil(remainingMs / 60000) + " min"
+            : Math.ceil(remainingMs / 1000) + " s";
+
+        throw new Error("You've scanned this bin recently. Try again in " + wait + ".");
+      }
+
+      const lastAnyScan = account.lastScanAt && account.lastScanAt.toMillis
+        ? account.lastScanAt.toMillis()
+        : 0;
+
+      if (Date.now() - lastAnyScan < 12000) {
+        throw new Error("Slow down! Wait a few seconds between scans.");
+      }
+
+      transaction.update(userRef, {
+        points: Number(account.points || 0) + pointsToAward,
+        lifetime: Number(account.lifetime || 0) + pointsToAward,
+        items: Number(account.items || 0) + 1,
+        binScans: { ...(account.binScans || {}), [code]: Date.now() },
         lastScanAt: serverTimestamp()
       });
     });
-    const fresh = await getDoc(userRef);
-    data = fresh.data();
+
+    const freshSnapshot = await getDoc(userRef);
+    data = freshSnapshot.data();
+
     stopScan();
-    msg("log-msg", `+${pts} points added. Thanks for keeping it clean! 🌍`);
-  } catch (e) {
+    msg("log-msg", "+" + pointsToAward + " points added. Thanks for keeping it clean! 🌍");
+  } catch (error) {
     stopScan();
-    console.error("Scan failed:", e);
-    msg("log-msg", e.code === "permission-denied" ? "Firestore refused the update (permission-denied). Publish the latest firestore.rules in Firebase, then try again." : ((e.code ? e.code + ": " : "") + (e.message || "Something went wrong.")), true);
+    console.error("Scan failed:", error);
+
+    const message = error.code === "permission-denied"
+      ? "Firestore refused the update (permission-denied). Check that your latest firestore.rules are published in Firebase."
+      : (error.code ? error.code + ": " : "") + (error.message || "Something went wrong.");
+
+    msg("log-msg", message, true);
   }
+
   render();
 }
 
 /* ---- Scanner ---- */
-let stream = null, scanning = false, lastRaw = "", lastAt = 0;
-const video = $("video"), canvas = document.createElement("canvas"), ctx = canvas.getContext("2d", { willReadFrequently: true });
-const detector = "BarcodeDetector" in window ? new BarcodeDetector({ formats: ["qr_code"] }) : null;
+let stream = null;
+let scanning = false;
+let lastRaw = "";
+let lastAt = 0;
 
-async function decodeFrame(source, w, h) {
-  if (detector) { try { const r = await detector.detect(source); if (r[0]) return r[0].rawValue; } catch {} }
-  if (window.jsQR && w && h) {
-    const s = Math.min(1, 720 / Math.max(w, h)), cw = Math.round(w * s), ch = Math.round(h * s);
-    canvas.width = cw; canvas.height = ch; ctx.drawImage(source, 0, 0, cw, ch);
-    const q = jsQR(ctx.getImageData(0, 0, cw, ch).data, cw, ch, { inversionAttempts: "attemptBoth" });
-    return q ? q.data : null;
+const video = $("video");
+const canvas = document.createElement("canvas");
+const context = canvas.getContext("2d", { willReadFrequently: true });
+
+let detector = null;
+
+if ("BarcodeDetector" in window) {
+  try {
+    detector = new BarcodeDetector({ formats: ["qr_code"] });
+  } catch (error) {
+    console.warn("Native QR detector unavailable; using jsQR instead:", error);
   }
-  return null;
 }
-async function loop() {
+
+async function decodeFrame(source, width, height) {
+  if (detector) {
+    try {
+      const results = await detector.detect(source);
+      if (results.length > 0 && results[0].rawValue) {
+        return results[0].rawValue;
+      }
+    } catch (error) {
+      console.warn("Native QR detection failed; trying jsQR:", error);
+    }
+  }
+
+  if (!window.jsQR || !width || !height || !context) return null;
+
+  try {
+    const scale = Math.min(1, 720 / Math.max(width, height));
+    const scaledWidth = Math.round(width * scale);
+    const scaledHeight = Math.round(height * scale);
+
+    canvas.width = scaledWidth;
+    canvas.height = scaledHeight;
+    context.drawImage(source, 0, 0, scaledWidth, scaledHeight);
+
+    const image = context.getImageData(0, 0, scaledWidth, scaledHeight);
+    const result = window.jsQR(image.data, scaledWidth, scaledHeight, {
+      inversionAttempts: "attemptBoth"
+    });
+
+    return result ? result.data : null;
+  } catch (error) {
+    console.error("QR frame decoding failed:", error);
+    return null;
+  }
+}
+
+async function scanLoop() {
   if (!scanning) return;
-  if (video.readyState >= 2) {
-    const raw = await decodeFrame(video, video.videoWidth, video.videoHeight);
-    if (raw && (raw !== lastRaw || Date.now() - lastAt > 4000)) { lastRaw = raw; lastAt = Date.now(); await claimCode(raw); }
+
+  if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    const rawText = await decodeFrame(video, video.videoWidth, video.videoHeight);
+
+    if (rawText && (rawText !== lastRaw || Date.now() - lastAt > 4000)) {
+      lastRaw = rawText;
+      lastAt = Date.now();
+      await claimCode(rawText);
+    }
   }
-  setTimeout(() => requestAnimationFrame(loop), 150);
+
+  if (scanning) {
+    setTimeout(() => requestAnimationFrame(scanLoop), 150);
+  }
 }
+
+async function openCamera() {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
+      audio: false
+    });
+  } catch (error) {
+    if (error.name !== "OverconstrainedError" && error.name !== "NotFoundError") {
+      throw error;
+    }
+
+    // Some Chromebooks and webcams do not expose a rear-facing camera.
+    return navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+  }
+}
+
 async function startScan() {
   msg("log-msg", "");
-  if (!window.isSecureContext) return msg("log-msg", "The camera only works on https or http://localhost. Open the site from your Firebase address (https://...web.app) or localhost, not as a file.", true);
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return msg("log-msg", "This browser can't open the camera. Try Chrome or Safari.", true);
-  if (!detector && !window.jsQR) return msg("log-msg", "The QR reader library didn't load. Check your internet connection and refresh.", true);
+
+  if (!window.isSecureContext) {
+    msg("log-msg", "The camera only works on HTTPS or http://localhost. Open the deployed site using its HTTPS address.", true);
+    return;
+  }
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    msg("log-msg", "This browser can't access a camera. Try an updated version of Chrome or Safari.", true);
+    return;
+  }
+
+  if (!detector && !window.jsQR) {
+    msg("log-msg", "The QR reader library didn't load. Check your internet connection and refresh the page.", true);
+    return;
+  }
+
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-    video.srcObject = stream; await video.play();
-    scanning = true; $("scanner").hidden = false; $("scan-start").hidden = true; $("scan-stop").hidden = false; msg("log-msg", "Scanning… hold the QR code steady inside the square."); loop();
-  } catch (e) { msg("log-msg", (e && e.name === "NotAllowedError" ? "Camera permission was blocked. Allow it in your browser's site settings, then try again. " : "") + "Couldn't open the camera. Allow camera access (it needs https or localhost) and try again.", true); }
+    stream = await openCamera();
+    video.srcObject = stream;
+    $("scanner").hidden = false;
+    $("scan-start").hidden = true;
+    $("scan-stop").hidden = false;
+
+    await video.play();
+
+    scanning = true;
+    lastRaw = "";
+    lastAt = 0;
+    msg("log-msg", "Scanning… hold a SmartBin QR code steady inside the square.");
+    scanLoop();
+  } catch (error) {
+    stopScan();
+    console.error("Camera start failed:", error);
+
+    if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
+      msg("log-msg", "Camera permission was blocked. Allow camera access in your browser's site settings, then try again.", true);
+    } else if (error.name === "NotFoundError" || error.name === "DevicesNotFoundError") {
+      msg("log-msg", "No camera was found on this device.", true);
+    } else if (error.name === "NotReadableError") {
+      msg("log-msg", "The camera is already being used by another app. Close that app and try again.", true);
+    } else {
+      msg("log-msg", "Couldn't open the camera. Check camera permission and try again.", true);
+    }
+  }
 }
+
 function stopScan() {
-  scanning = false; if (stream) stream.getTracks().forEach(t => t.stop()); stream = null;
-  $("scanner").hidden = true; $("scan-start").hidden = false; $("scan-stop").hidden = true;
+  scanning = false;
+
+  if (stream) {
+    stream.getTracks().forEach(track => track.stop());
+    stream = null;
+  }
+
+  if (video) video.srcObject = null;
+
+  if ($("scanner")) $("scanner").hidden = true;
+  if ($("scan-start")) $("scan-start").hidden = false;
+  if ($("scan-stop")) $("scan-stop").hidden = true;
 }
+
 $("scan-start").onclick = startScan;
 $("scan-stop").onclick = stopScan;
 
+/* ---- Rewards ---- */
 async function redeem(id) {
-  const rw = REWARDS.find(r => r.id === id);
-  const ref = doc(db, "users", user.uid);
+  const reward = REWARDS.find(item => item.id === id);
+  if (!reward || !user) return;
+
+  const userRef = doc(db, "users", user.uid);
+
   try {
-    data = await runTransaction(db, async tx => {
-      const d = (await tx.get(ref)).data();
-      if (d.points < rw.cost) throw new Error("Not enough points yet.");
-      const next = { ...d, points: d.points - rw.cost };
-      tx.update(ref, next);
-      return next;
+    data = await runTransaction(db, async transaction => {
+      const snapshot = await transaction.get(userRef);
+      if (!snapshot.exists()) throw new Error("Your account record is missing.");
+
+      const account = snapshot.data();
+      if (Number(account.points || 0) < reward.cost) {
+        throw new Error("Not enough points yet.");
+      }
+
+      const nextAccount = {
+        ...account,
+        points: Number(account.points || 0) - reward.cost
+      };
+
+      transaction.update(userRef, { points: nextAccount.points });
+      return nextAccount;
     });
-    await addDoc(collection(db, "users", user.uid, "redemptions"),
-      { rewardId: rw.id, email: user.email, reward: rw.name, cost: rw.cost, status: "pending", createdAt: serverTimestamp() });
-    msg("reward-msg", `Redeemed: ${rw.name}! We'll email your reward soon.`);
-    loadHistory();
-  } catch (e) { msg("reward-msg", e.message, true); }
+
+    await addDoc(collection(db, "users", user.uid, "redemptions"), {
+      rewardId: reward.id,
+      email: user.email,
+      reward: reward.name,
+      cost: reward.cost,
+      status: "pending",
+      createdAt: serverTimestamp()
+    });
+
+    msg("reward-msg", "Redeemed: " + reward.name + "! We'll email your reward soon.");
+    await loadHistory();
+  } catch (error) {
+    msg("reward-msg", error.message || "Couldn't redeem that reward.", true);
+  }
+
   render();
 }
 
 async function loadHistory() {
-  const q = query(collection(db, "users", user.uid, "redemptions"), orderBy("createdAt", "desc"), limit(20));
-  const snap = await getDocs(q);
-  $("history").innerHTML = snap.empty ? `<li class="muted">Nothing yet.</li>` :
-    snap.docs.map(d => { const r = d.data();
-      return `<li><span>${r.reward}</span><span class="muted">${r.cost.toLocaleString()} pts · ${r.status}</span></li>`; }).join("");
+  const historyQuery = query(
+    collection(db, "users", user.uid, "redemptions"),
+    orderBy("createdAt", "desc"),
+    limit(20)
+  );
+
+  const snapshot = await getDocs(historyQuery);
+
+  $("history").innerHTML = snapshot.empty
+    ? '<li class="muted">Nothing yet.</li>'
+    : snapshot.docs.map(document => {
+        const reward = document.data();
+        return '<li><span>' + reward.reward + '</span><span class="muted">' +
+          Number(reward.cost || 0).toLocaleString() + ' pts · ' + reward.status +
+          '</span></li>';
+      }).join("");
 }
