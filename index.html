@@ -45,7 +45,7 @@
 
     <section class="card">
       <h2>Scan a SmartBin code</h2>
-      <p class="muted">Point your camera at the QR code on a SmartBin to add its points to your account. Each code can only be claimed once per rule set by the bin (once ever, or once a day).</p>
+      <p class="muted">Point your camera at the QR code on a SmartBin to add its points to your account. Each bin can be scanned again after its cooldown.</p>
       <div class="scanner" id="scanner" hidden>
         <video id="video" playsinline muted></video>
         <div class="reticle"></div>
@@ -71,7 +71,8 @@
   </main>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script>window.jsQR||document.write('<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"><\/script>')</script>
 <script type="module" src="app.js"></script>
 </body>
 </html>
