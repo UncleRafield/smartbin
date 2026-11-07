@@ -2,51 +2,25 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    match /codes/{code} {
-      allow get: if request.auth != null;
-      allow list, write: if false;
-    }
-
-    match /rewards/{rewardId} {
-      allow read: if request.auth != null;
-      allow write: if false;
-    }
-
     match /users/{uid} {
       allow read: if request.auth != null && request.auth.uid == uid;
       allow create: if request.auth != null && request.auth.uid == uid
                     && request.resource.data.points == 0;
 
+      // Points can go down (redeeming), or go up by at most 100 per scan with at least 10 seconds between scans.
       allow update: if request.auth != null && request.auth.uid == uid
         && request.resource.data.points >= 0
         && (
           request.resource.data.points <= resource.data.points
           || (
-            existsAfter(/databases/$(database)/documents/users/$(uid)/claims/$(request.resource.data.lastClaimId))
-            && getAfter(/databases/$(database)/documents/users/$(uid)/claims/$(request.resource.data.lastClaimId)).data.at == request.time
-            && getAfter(/databases/$(database)/documents/users/$(uid)/claims/$(request.resource.data.lastClaimId)).data.points
-               == request.resource.data.points - resource.data.points
+            request.resource.data.points - resource.data.points <= 100
+            && request.resource.data.lastScanAt == request.time
+            && (!('lastScanAt' in resource.data) || request.time > resource.data.lastScanAt + duration.value(10, 's'))
           )
         );
 
-      match /claims/{claimId} {
-        allow read: if request.auth != null && request.auth.uid == uid;
-        allow create: if request.auth != null && request.auth.uid == uid
-          && request.resource.data.code == claimId
-          && request.resource.data.at == request.time
-          && request.resource.data.points == get(/databases/$(database)/documents/codes/$(claimId)).data.points;
-        allow update: if request.auth != null && request.auth.uid == uid
-          && request.resource.data.code == claimId
-          && request.resource.data.at == request.time
-          && request.resource.data.points == get(/databases/$(database)/documents/codes/$(claimId)).data.points
-          && request.time > resource.data.at + duration.value(
-               get(/databases/$(database)/documents/codes/$(claimId)).data.get('cooldownMinutes', 1440), 'm');
-      }
-
       match /redemptions/{id} {
-        allow read: if request.auth != null && request.auth.uid == uid;
-        allow create: if request.auth != null && request.auth.uid == uid
-          && request.resource.data.cost == get(/databases/$(database)/documents/rewards/$(request.resource.data.rewardId)).data.cost;
+        allow read, create: if request.auth != null && request.auth.uid == uid;
       }
     }
   }
