@@ -44,13 +44,13 @@
     const statusEl = document.getElementById("status");
 
     // Monitor login state [1.1.8]
+    // We only use this now to update the on-screen text, NOT to redirect [1.1.8]
     auth.onAuthStateChanged((user) => {
-  if (user) {
-    // Automatically redirect to the dashboard [1.1.8]
-    window.location.href = "dashboard.html";
-  } else {
-    statusEl.textContent = "Status: Not logged in.";
-  }
+      if (user) {
+        statusEl.textContent = "Status: Logged in as " + user.email;
+      } else {
+        statusEl.textContent = "Status: Not logged in.";
+      }
 });
 
     // Create Account (Sign Up) [1.1.1, 1.1.5]
