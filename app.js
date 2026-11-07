@@ -5,19 +5,25 @@ import { getFirestore, doc, getDoc, setDoc, runTransaction, addDoc, collection, 
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 
+if (!firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith("YOUR_")) {
+  document.addEventListener("DOMContentLoaded", () => {
+    document.getElementById("auth-error").textContent = "firebase-config.js still has placeholder values. Paste your real config and save the file.";
+  });
+}
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
 
 /* ---- Settings ---- */
-const REWARDS = [
-  { id: "bottle", name: "Reusable bottle",   emoji: "🥤", cost: 2000 },
-  { id: "gc5",    name: "£5 gift card",      emoji: "🎁", cost: 3000 },
-  { id: "gc10",   name: "£10 gift card",     emoji: "💷", cost: 6500 },
-  { id: "gc25",   name: "£25 gift card",     emoji: "💳", cost: 17000 },
-  { id: "tree",   name: "Plant a tree",      emoji: "🌳", cost: 25000 },
+// Fallback list, used only if the 'rewards' collection in Firestore is empty.
+const DEFAULT_REWARDS = [
+  { id: "bottle", name: "Reusable bottle", emoji: "🥤", cost: 2000 },
+  { id: "gc5",    name: "£5 gift card",    emoji: "🎁", cost: 3000 },
+  { id: "gc10",   name: "£10 gift card",   emoji: "💷", cost: 6500 },
+  { id: "gc25",   name: "£25 gift card",   emoji: "💳", cost: 17000 },
+  { id: "tree",   name: "Plant a tree",    emoji: "🌳", cost: 25000 },
 ];
-
+let REWARDS = DEFAULT_REWARDS;
 const $ = id => document.getElementById(id);
 let mode = "login", user = null, data = null;
 
@@ -60,8 +66,11 @@ function friendly(err) {
   if (c.includes("weak-password")) return "Password must be at least 6 characters.";
   if (c.includes("invalid-email")) return "Please enter a valid email.";
   if (c.includes("too-many-requests")) return "Too many attempts. Try again later.";
-  if (c.includes("api-key") || c.includes("invalid-api")) return "Firebase isn't configured yet – see firebase-config.js.";
-  return err.message || "Something went wrong.";
+  if (c.includes("api-key") || c.includes("invalid-api")) return "Firebase rejected the API key (" + c + "). Re-copy apiKey from Project settings > Your apps, and check its restrictions in Google Cloud > Credentials.";
+  if (c.includes("configuration-not-found") || c.includes("operation-not-allowed")) return "Email/Password sign-in isn't enabled. Firebase console > Authentication > Sign-in method > Email/Password > Enable.";
+  if (c.includes("unauthorized-domain")) return "This domain isn't allowed. Firebase console > Authentication > Settings > Authorized domains > add it.";
+  if (c.includes("network-request-failed")) return "Couldn't reach Firebase. Check your connection.";
+  return (c ? c + ": " : "") + (err.message || "Something went wrong.");
 }
 
 /* ---- Session ---- */
@@ -73,11 +82,22 @@ onAuthStateChanged(auth, async u => {
   if (u) {
     $("user-email").textContent = u.email;
     await loadUser();
+    await loadRewards();
     renderRewards(); render(); loadHistory();
   } else {
     $("auth-form").reset();
   }
 });
+
+async function loadRewards() {
+  try {
+    const snap = await getDocs(collection(db, "rewards"));
+    const list = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      .filter(r => r.active !== false && r.name && Number.isFinite(r.cost))
+      .sort((a, b) => (a.order ?? a.cost) - (b.order ?? b.cost));
+    if (list.length) REWARDS = list.map(r => ({ ...r, emoji: r.emoji || "🎁" }));
+  } catch (e) { /* keep defaults */ }
+}
 
 async function loadUser() {
   const ref = doc(db, "users", user.uid);
@@ -113,8 +133,6 @@ function renderRewards() {
 function msg(id, text, err) { const el = $(id); el.textContent = text; el.className = "msg" + (err ? " err" : ""); }
 
 /* ---- Actions ---- */
-const dayStamp = () => { const d = new Date(); return `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`; }; // UTC, matches firestore.rules
-
 /* ---- QR codes ----
    A SmartBin QR code contains JSON like:  {"app":"smartbin","code":"BIN-0001","points":10}
    The points shown in the QR must match the code stored in Firestore (codes/BIN-0001),
@@ -130,11 +148,16 @@ async function claimCode(raw) {
     data = await runTransaction(db, async tx => {
       const codeSnap = await tx.get(codeRef);
       if (!codeSnap.exists() || codeSnap.data().points !== p.points) throw new Error("This code isn't valid or has expired.");
-      const claimId = codeSnap.data().daily ? `${p.code}_${dayStamp()}` : p.code;
+      const cooldownMin = codeSnap.data().cooldownMinutes ?? 1440; // default: once a day per bin
+      const claimId = p.code;
       const claimRef = doc(db, "users", user.uid, "claims", claimId);
-      if ((await tx.get(claimRef)).exists()) throw new Error(codeSnap.data().daily ? "You've already scanned this bin today." : "You've already claimed this code.");
+      const prev = await tx.get(claimRef);
+      if (prev.exists() && prev.data().at) {
+        const waitMs = prev.data().at.toMillis() + cooldownMin * 60000 - Date.now();
+        if (waitMs > 0) throw new Error(`You've already scanned this bin. Try again in ${waitMs > 3600000 ? Math.ceil(waitMs / 3600000) + " h" : Math.ceil(waitMs / 60000) + " min"}.`);
+      }
       const d = (await tx.get(userRef)).data();
-      tx.set(claimRef, { code: p.code, points: p.points, createdAt: serverTimestamp() });
+      tx.set(claimRef, { code: p.code, points: p.points, at: serverTimestamp() });
       const next = { ...d, points: d.points + p.points, lifetime: d.lifetime + p.points, items: d.items + 1, lastClaimId: claimId };
       tx.update(userRef, next);
       return next;
@@ -153,8 +176,12 @@ const detector = "BarcodeDetector" in window ? new BarcodeDetector({ formats: ["
 
 async function decodeFrame(source, w, h) {
   if (detector) { try { const r = await detector.detect(source); if (r[0]) return r[0].rawValue; } catch {} }
-  if (window.jsQR) { canvas.width = w; canvas.height = h; ctx.drawImage(source, 0, 0, w, h);
-    const q = jsQR(ctx.getImageData(0, 0, w, h).data, w, h); return q ? q.data : null; }
+  if (window.jsQR && w && h) {
+    const s = Math.min(1, 720 / Math.max(w, h)), cw = Math.round(w * s), ch = Math.round(h * s);
+    canvas.width = cw; canvas.height = ch; ctx.drawImage(source, 0, 0, cw, ch);
+    const q = jsQR(ctx.getImageData(0, 0, cw, ch).data, cw, ch, { inversionAttempts: "attemptBoth" });
+    return q ? q.data : null;
+  }
   return null;
 }
 async function loop() {
@@ -167,11 +194,14 @@ async function loop() {
 }
 async function startScan() {
   msg("log-msg", "");
+  if (!window.isSecureContext) return msg("log-msg", "The camera only works on https or http://localhost. Open the site from your Firebase address (https://...web.app) or localhost, not as a file.", true);
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return msg("log-msg", "This browser can't open the camera. Try Chrome or Safari.", true);
+  if (!detector && !window.jsQR) return msg("log-msg", "The QR reader library didn't load. Check your internet connection and refresh.", true);
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
     video.srcObject = stream; await video.play();
-    scanning = true; $("scanner").hidden = false; $("scan-start").hidden = true; $("scan-stop").hidden = false; loop();
-  } catch { msg("log-msg", "Couldn't open the camera. Allow camera access (needs https), or upload a photo of the QR code instead.", true); }
+    scanning = true; $("scanner").hidden = false; $("scan-start").hidden = true; $("scan-stop").hidden = false; msg("log-msg", "Scanning… hold the QR code steady inside the square."); loop();
+  } catch (e) { msg("log-msg", (e && e.name === "NotAllowedError" ? "Camera permission was blocked. Allow it in your browser's site settings, then try again. " : "") + "Couldn't open the camera. Allow camera access (it needs https or localhost) and try again.", true); }
 }
 function stopScan() {
   scanning = false; if (stream) stream.getTracks().forEach(t => t.stop()); stream = null;
@@ -179,12 +209,6 @@ function stopScan() {
 }
 $("scan-start").onclick = startScan;
 $("scan-stop").onclick = stopScan;
-$("qr-file").onchange = async e => {
-  const f = e.target.files[0]; e.target.value = ""; if (!f) return;
-  const img = await createImageBitmap(f);
-  const raw = await decodeFrame(img, img.width, img.height);
-  raw ? claimCode(raw) : msg("log-msg", "No QR code found in that image.", true);
-};
 
 async function redeem(id) {
   const rw = REWARDS.find(r => r.id === id);
@@ -198,7 +222,7 @@ async function redeem(id) {
       return next;
     });
     await addDoc(collection(db, "users", user.uid, "redemptions"),
-      { reward: rw.name, cost: rw.cost, status: "pending", createdAt: serverTimestamp() });
+      { rewardId: rw.id, email: user.email, reward: rw.name, cost: rw.cost, status: "pending", createdAt: serverTimestamp() });
     msg("reward-msg", `Redeemed: ${rw.name}! We'll email your reward soon.`);
     loadHistory();
   } catch (e) { msg("reward-msg", e.message, true); }
