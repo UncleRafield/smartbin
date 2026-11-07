@@ -45,16 +45,13 @@
 
     // Monitor login state [1.1.8]
     auth.onAuthStateChanged((user) => {
-      if (user) {
-        statusEl.textContent = "Status: Logged in as " + user.email;
-        statusEl.style.color = "green";
-        document.getElementById("signOutBtn").style.display = "inline";
-      } else {
-        statusEl.textContent = "Status: Not logged in.";
-        statusEl.style.color = "blue";
-        document.getElementById("signOutBtn").style.display = "none";
-      }
-    });
+  if (user) {
+    // Automatically redirect to the dashboard [1.1.8]
+    window.location.href = "dashboard.html";
+  } else {
+    statusEl.textContent = "Status: Not logged in.";
+  }
+});
 
     // Create Account (Sign Up) [1.1.1, 1.1.5]
     document.getElementById("signUpBtn").onclick = function() {
