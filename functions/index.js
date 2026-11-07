@@ -1,6 +1,6 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { initializeApp } = require("firebase-admin/app");
-const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
+const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 
 initializeApp();
 
@@ -49,15 +49,21 @@ function parsePayload(rawText) {
     throw new HttpsError("invalid-argument", "This QR code belongs to a different app.");
   }
 
-  if (typeof payload.code !== "string" || !/^BIN-\d{4}$/.test(payload.code)) {
+  if (typeof payload.code !== "string" || !/^BIN-\d{4}$/i.test(payload.code)) {
     throw new HttpsError("invalid-argument", "The bin code format is invalid.");
   }
+
+  payload.code = payload.code.toUpperCase();
 
   if (!Number.isSafeInteger(payload.points) || payload.points < 1 || payload.points > MAX_POINTS_PER_CODE) {
     throw new HttpsError("invalid-argument", "The points value is invalid.");
   }
 
   return payload;
+}
+
+function timestampMillis(value) {
+  return value && typeof value.toMillis === "function" ? value.toMillis() : 0;
 }
 
 exports.ensureAccount = onCall({ region: REGION }, async request => {
@@ -84,75 +90,101 @@ exports.claimBin = onCall({ region: REGION, enforceAppCheck: false }, async requ
   const uid = requireUser(request);
   const payload = parsePayload(request.data && request.data.rawText);
   const userRef = db.collection("users").doc(uid);
-  const codeRef = db.collection("codes").doc(payload.code);
   const claimRef = userRef.collection("binClaims").doc(payload.code);
 
-  const result = await db.runTransaction(async transaction => {
-    const [userSnapshot, codeSnapshot, claimSnapshot] = await Promise.all([
-      transaction.get(userRef),
-      transaction.get(codeRef),
-      transaction.get(claimRef)
-    ]);
+  try {
+    const result = await db.runTransaction(async transaction => {
+      // Firestore transaction reads are deliberately sequential and all happen
+      // before any writes. This avoids transaction-order errors.
+      const userSnapshot = await transaction.get(userRef);
 
-    if (!userSnapshot.exists) {
-      throw new HttpsError("failed-precondition", "Your account profile is missing. Log out and back in.");
-    }
-    if (!codeSnapshot.exists) {
-      throw new HttpsError("not-found", "That bin code isn't registered.");
-    }
+      let codeRef = db.collection("codes").doc(payload.code);
+      let codeSnapshot = await transaction.get(codeRef);
 
-    const registered = codeSnapshot.data();
-    if (!Number.isSafeInteger(registered.points) || registered.points < 1 || registered.points > MAX_POINTS_PER_CODE) {
-      throw new HttpsError("failed-precondition", "This bin has an invalid points configuration.");
-    }
-    if (payload.points !== registered.points) {
-      throw new HttpsError("invalid-argument", "The points in this QR code don't match the registered bin.");
-    }
-
-    const cooldownMinutes = registered.cooldownMinutes === undefined ? 1440 : registered.cooldownMinutes;
-    if (!Number.isFinite(cooldownMinutes) || cooldownMinutes < 1 || cooldownMinutes > 525600) {
-      throw new HttpsError("failed-precondition", "This bin has an invalid cooldown configuration.");
-    }
-
-    const account = userSnapshot.data();
-    const now = Date.now();
-    const lastScanAt = account.lastScanAt instanceof Timestamp ? account.lastScanAt.toMillis() : 0;
-
-    if (now - lastScanAt < GLOBAL_SCAN_GAP_MS) {
-      throw new HttpsError("resource-exhausted", "Slow down! Wait a few seconds between scans.");
-    }
-
-    if (claimSnapshot.exists) {
-      const previous = claimSnapshot.data();
-      const previousAt = previous.claimedAt instanceof Timestamp ? previous.claimedAt.toMillis() : 0;
-      const remainingMs = previousAt + cooldownMinutes * 60_000 - now;
-
-      if (remainingMs > 0) {
-        const wait = remainingMs >= 3_600_000
-          ? Math.ceil(remainingMs / 3_600_000) + " h"
-          : Math.ceil(remainingMs / 60_000) + " min";
-        throw new HttpsError("resource-exhausted", "You've scanned this bin recently. Try again in " + wait + ".");
+      // Accept an accidentally lower-case document ID too (bin-0001).
+      if (!codeSnapshot.exists) {
+        const lowerCodeRef = db.collection("codes").doc(payload.code.toLowerCase());
+        const lowerCodeSnapshot = await transaction.get(lowerCodeRef);
+        if (lowerCodeSnapshot.exists) {
+          codeRef = lowerCodeRef;
+          codeSnapshot = lowerCodeSnapshot;
+        }
       }
-    }
 
-    const points = registered.points;
-    transaction.set(claimRef, {
-      code: payload.code,
-      points,
-      claimedAt: FieldValue.serverTimestamp()
+      const claimSnapshot = await transaction.get(claimRef);
+
+      if (!userSnapshot.exists) {
+        throw new HttpsError("failed-precondition", "Your account profile is missing. Log out and back in.");
+      }
+      if (!codeSnapshot.exists) {
+        throw new HttpsError("not-found", "Bin " + payload.code + " isn't registered. Check the document ID in Firestore.");
+      }
+
+      const registered = codeSnapshot.data() || {};
+      const points = Number(registered.points);
+      if (!Number.isSafeInteger(points) || points < 1 || points > MAX_POINTS_PER_CODE) {
+        throw new HttpsError("failed-precondition", "The points field for " + payload.code + " must be a number from 1 to 100.");
+      }
+      if (payload.points !== points) {
+        throw new HttpsError("invalid-argument", "This QR code says " + payload.points + " points, but Firestore has " + points + ". Make them match.");
+      }
+
+      const cooldownMinutes = registered.cooldownMinutes === undefined
+        ? 1440
+        : Number(registered.cooldownMinutes);
+
+      if (!Number.isFinite(cooldownMinutes) || cooldownMinutes < 1 || cooldownMinutes > 525600) {
+        throw new HttpsError("failed-precondition", "The cooldownMinutes field for " + payload.code + " must be a number from 1 to 525600.");
+      }
+
+      const account = userSnapshot.data() || {};
+      const now = Date.now();
+      const lastScanAt = timestampMillis(account.lastScanAt);
+
+      if (now - lastScanAt < GLOBAL_SCAN_GAP_MS) {
+        throw new HttpsError("resource-exhausted", "Wait a few seconds between scans.");
+      }
+
+      if (claimSnapshot.exists) {
+        const previousAt = timestampMillis(claimSnapshot.data().claimedAt);
+        const remainingMs = previousAt + cooldownMinutes * 60_000 - now;
+
+        if (remainingMs > 0) {
+          const wait = remainingMs >= 3_600_000
+            ? Math.ceil(remainingMs / 3_600_000) + " h"
+            : Math.ceil(remainingMs / 60_000) + " min";
+          throw new HttpsError("resource-exhausted", "You've scanned this bin recently. Try again in " + wait + ".");
+        }
+      }
+
+      transaction.set(claimRef, {
+        code: payload.code,
+        points,
+        claimedAt: FieldValue.serverTimestamp()
+      });
+
+      transaction.update(userRef, {
+        points: (Number(account.points) || 0) + points,
+        lifetime: (Number(account.lifetime) || 0) + points,
+        items: (Number(account.items) || 0) + 1,
+        lastScanAt: FieldValue.serverTimestamp()
+      });
+
+      return { points };
     });
 
-    transaction.update(userRef, {
-      points: (Number(account.points) || 0) + points,
-      lifetime: (Number(account.lifetime) || 0) + points,
-      items: (Number(account.items) || 0) + 1,
-      lastScanAt: FieldValue.serverTimestamp()
-    });
+    return result;
+  } catch (error) {
+    if (error instanceof HttpsError) throw error;
 
-    return { points };
-  });
-
-  return result;
+    // Keep the real cause in Firebase Functions logs while returning a useful
+    // message to the app instead of the unhelpful word "internal".
+    console.error("claimBin failed:", error);
+    throw new HttpsError(
+      "internal",
+      "SmartBin couldn't finish this scan because of a server error. Check the claimBin function logs in Firebase Console."
+    );
+  }
 });
 
 exports.redeemReward = onCall({ region: REGION }, async request => {
@@ -173,7 +205,7 @@ exports.redeemReward = onCall({ region: REGION }, async request => {
       throw new HttpsError("failed-precondition", "Your account profile is missing.");
     }
 
-    const account = snapshot.data();
+    const account = snapshot.data() || {};
     const points = Number(account.points) || 0;
     if (points < reward.cost) {
       throw new HttpsError("failed-precondition", "Not enough points yet.");
