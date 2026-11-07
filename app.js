@@ -1,393 +1,299 @@
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut }
-  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, doc, getDoc, collection, query, orderBy, limit, getDocs }
-  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { getFunctions, httpsCallable }
-  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
-import { firebaseConfig } from "./firebase-config.js";
-import { REWARDS } from "./store.js";
-
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const functions = getFunctions(app, "europe-west2");
-
-const ensureAccount = httpsCallable(functions, "ensureAccount");
-const claimBin = httpsCallable(functions, "claimBin");
-const redeemRewardCall = httpsCallable(functions, "redeemReward");
-
-/* ---- Settings ---- */
+/* SmartBin local edition — no Firebase or external backend.
+   Accounts, points and redemption history are stored in this browser only. */
 const $ = id => document.getElementById(id);
+const USERS_KEY = "smartbin.users.v1";
+const SESSION_KEY = "smartbin.session.v1";
+const DATA_KEY_PREFIX = "smartbin.data.v1:";
+const PBKDF2_ITERATIONS = 150000;
 let mode = "login";
 let user = null;
-let data = null;
-
-/* ---- Auth UI ---- */
-function setMode(nextMode) {
-  mode = nextMode;
-  $("tab-login").classList.toggle("active", mode === "login");
-  $("tab-signup").classList.toggle("active", mode === "signup");
-  $("auth-submit").textContent = mode === "login" ? "Log in" : "Create account";
-  $("password").autocomplete = mode === "login" ? "current-password" : "new-password";
-  $("auth-error").textContent = "";
-}
-
-$("tab-login").onclick = () => setMode("login");
-$("tab-signup").onclick = () => setMode("signup");
-
-$("auth-form").addEventListener("submit", async event => {
-  event.preventDefault();
-  $("auth-error").textContent = "";
-
-  const email = $("email").value.trim();
-  const password = $("password").value;
-
-  try {
-    if (mode === "signup") {
-      await createUserWithEmailAndPassword(auth, email, password);
-      // The authenticated session creates its profile through ensureAccount().
-    } else {
-      await signInWithEmailAndPassword(auth, email, password);
-    }
-  } catch (error) {
-    $("auth-error").textContent = friendly(error);
-  }
-});
-
-$("logout").onclick = () => signOut(auth);
-
-function friendly(error) {
-  const code = error.code || "";
-
-  if (code.includes("invalid-credential") || code.includes("wrong-password") || code.includes("user-not-found")) return "Incorrect email or password.";
-  if (code.includes("email-already-in-use")) return "That email already has an account – try logging in.";
-  if (code.includes("weak-password")) return "Password must be at least 6 characters.";
-  if (code.includes("invalid-email")) return "Please enter a valid email.";
-  if (code.includes("too-many-requests")) return "Too many attempts. Try again later.";
-  if (code.includes("api-key") || code.includes("invalid-api")) return "Firebase rejected the API key. Check firebase-config.js and the API key restrictions.";
-  if (code.includes("configuration-not-found") || code.includes("operation-not-allowed")) return "Email/Password sign-in isn't enabled. Firebase console > Authentication > Sign-in method > Email/Password > Enable.";
-  if (code.includes("unauthorized-domain")) return "This domain isn't allowed. Firebase console > Authentication > Settings > Authorized domains > add it.";
-  if (code.includes("network-request-failed")) return "Couldn't reach Firebase. Check your connection.";
-
-  return error.message || (code ? code + ": Something went wrong." : "Something went wrong.");
-}
-
-function backendMessage(error) {
-  const code = error.code || "";
-
-  if (code.includes("unauthenticated")) return "Please log in again before doing that.";
-  if (code.includes("not-found")) return "That bin code isn't registered. Please ask for a valid SmartBin QR code.";
-  if (code.includes("already-exists")) return "You've already claimed this bin code.";
-  if (code.includes("resource-exhausted")) return error.message || "Please wait before scanning again.";
-  if (code.includes("failed-precondition")) return error.message || "This action can't be completed right now.";
-  if (code.includes("invalid-argument")) return error.message || "That QR code isn't a valid SmartBin code.";
-  if (code.includes("permission-denied")) return "Firebase denied this action. Check that the latest backend and Firestore rules have been deployed.";
-  if (code.includes("unavailable")) return "The SmartBin server is temporarily unavailable. Try again shortly.";
-  if (code.includes("functions/internal") || code === "internal") {
-    console.error("Firebase callable function returned INTERNAL:", {
-      code: error.code,
-      message: error.message,
-      details: error.details
-    });
-    return "The SmartBin server crashed while processing this request (functions/internal). This is a backend deployment/runtime problem, not a QR-code problem. Check Firebase Console > Functions > claimBin > Logs.";
-  }
-  if (code.includes("functions/") && error.message) return error.message;
-
-  return error.message || (code ? code + ": Something went wrong. Check the browser console for details." : "Something went wrong. Please try again.");
-}
-
-/* ---- Session ---- */
-onAuthStateChanged(auth, async authenticatedUser => {
-  stopScan();
-  user = authenticatedUser;
-  $("auth-view").hidden = !!user;
-  $("app-view").hidden = !user;
-
-  if (user) {
-    $("user-email").textContent = user.email || "";
-    try {
-      await ensureAccount();
-      await loadUser();
-      renderRewards();
-      render();
-      await loadHistory();
-    } catch (error) {
-      console.error("Could not initialise account:", error);
-      msg("log-msg", backendMessage(error), true);
-    }
-  } else {
-    data = null;
-    $("auth-form").reset();
-  }
-});
-
-async function loadUser() {
-  const userRef = doc(db, "users", user.uid);
-  const snapshot = await getDoc(userRef);
-
-  if (!snapshot.exists()) {
-    throw new Error("Your account profile hasn't been created yet. Log out and back in.");
-  }
-
-  data = snapshot.data();
-}
-
-/* ---- Render ---- */
-function render() {
-  if (!data) return;
-
-  $("points").textContent = Number(data.points || 0).toLocaleString();
-  $("items").textContent = Number(data.items || 0).toLocaleString();
-  $("lifetime").textContent = Number(data.lifetime || 0).toLocaleString();
-
-  document.querySelectorAll(".reward").forEach(rewardElement => {
-    const reward = REWARDS.find(item => item.id === rewardElement.dataset.id);
-    if (!reward) return;
-
-    const button = rewardElement.querySelector(".btn");
-    const fill = rewardElement.querySelector(".fill");
-    button.disabled = Number(data.points || 0) < reward.cost;
-    fill.style.width = Math.min(100, Number(data.points || 0) / reward.cost * 100) + "%";
-  });
-}
-
-function renderRewards() {
-  $("rewards").innerHTML = REWARDS.map(reward =>
-    '<div class="reward" data-id="' + reward.id + '">' +
-      '<div style="font-size:1.8rem">' + reward.emoji + '</div>' +
-      '<h3>' + reward.name + '</h3>' +
-      '<div class="cost">' + reward.cost.toLocaleString() + ' pts</div>' +
-      '<div class="bar"><div class="fill" style="height:100%;background:var(--g)"></div></div>' +
-      '<button class="btn" type="button">Redeem</button>' +
-    '</div>'
-  ).join("");
-
-  document.querySelectorAll(".reward").forEach(element => {
-    element.querySelector(".btn").onclick = () => redeem(element.dataset.id);
-  });
-}
-
-function msg(id, message, isError = false) {
-  const element = $(id);
-  if (!element) return;
-  element.textContent = message;
-  element.className = "msg" + (isError ? " err" : "");
-}
-
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, character => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;"
-  })[character]);
-}
-
-/* ---- QR claiming ----
-   The server parses and validates the complete QR payload.
-   Never award points in this browser file.
-*/
-async function claimCode(rawText) {
-  if (!user) {
-    stopScan();
-    msg("log-msg", "Please log in before scanning a bin.", true);
-    return;
-  }
-
-  try {
-    const result = await claimBin({ rawText });
-    await loadUser();
-    stopScan();
-    msg("log-msg", "+" + result.data.points + " points added. Thanks for keeping it clean! 🌍");
-  } catch (error) {
-    stopScan();
-    console.error("Scan failed:", error);
-    msg("log-msg", backendMessage(error), true);
-  }
-
-  render();
-}
-
-/* ---- Scanner ---- */
+let account = null;
+let rewards = [];
+let bins = {};
 let stream = null;
 let scanning = false;
+let detector = null;
 let lastRaw = "";
 let lastAt = 0;
-
 const video = $("video");
 const canvas = document.createElement("canvas");
 const context = canvas.getContext("2d", { willReadFrequently: true });
 
-let detector = null;
+function readJSON(key, fallback) {
+  try { const value = JSON.parse(localStorage.getItem(key)); return value ?? fallback; }
+  catch { return fallback; }
+}
+function writeJSON(key, value) { localStorage.setItem(key, JSON.stringify(value)); }
+function userDataKey(email) { return DATA_KEY_PREFIX + email.toLowerCase(); }
+function showMessage(id, message, isError = false) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = message;
+  el.className = id === "auth-error" ? "error" : "msg" + (isError ? " err" : "");
+}
+function setMode(next) {
+  mode = next;
+  $("tab-login").classList.toggle("active", mode === "login");
+  $("tab-signup").classList.toggle("active", mode === "signup");
+  $("auth-submit").textContent = mode === "login" ? "Log in" : "Create account";
+  $("password").autocomplete = mode === "login" ? "current-password" : "new-password";
+  showMessage("auth-error", "");
+}
+$("tab-login").addEventListener("click", () => setMode("login"));
+$("tab-signup").addEventListener("click", () => setMode("signup"));
 
-if ("BarcodeDetector" in window) {
+function bytesToBase64(bytes) {
+  let binary = "";
+  bytes.forEach(byte => binary += String.fromCharCode(byte));
+  return btoa(binary);
+}
+async function passwordHash(password, saltText) {
+  const salt = saltText ? Uint8Array.from(atob(saltText), c => c.charCodeAt(0)) : crypto.getRandomValues(new Uint8Array(16));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: PBKDF2_ITERATIONS, hash: "SHA-256" }, key, 256);
+  return { salt: bytesToBase64(salt), hash: bytesToBase64(new Uint8Array(bits)) };
+}
+function sameText(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+$("auth-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  showMessage("auth-error", "");
+  const email = $("email").value.trim().toLowerCase();
+  const password = $("password").value;
+  if (!email || password.length < 6) return showMessage("auth-error", "Enter a valid email and a password of at least 6 characters.", true);
   try {
-    detector = new BarcodeDetector({ formats: ["qr_code"] });
+    const users = readJSON(USERS_KEY, {});
+    if (mode === "signup") {
+      if (users[email]) return showMessage("auth-error", "That email already has an account. Try logging in.", true);
+      const credentials = await passwordHash(password);
+      users[email] = credentials;
+      writeJSON(USERS_KEY, users);
+      writeJSON(userDataKey(email), { points: 0, lifetime: 0, items: 0, claims: {}, redemptions: [] });
+    } else {
+      const saved = users[email];
+      if (!saved) return showMessage("auth-error", "No account found for that email. Sign up first.", true);
+      const attempted = await passwordHash(password, saved.salt);
+      if (!sameText(attempted.hash, saved.hash)) return showMessage("auth-error", "Incorrect email or password.", true);
+    }
+    user = email;
+    localStorage.setItem(SESSION_KEY, email);
+    $("auth-form").reset();
+    showApp();
   } catch (error) {
-    console.warn("Native QR detector unavailable; using jsQR instead:", error);
+    console.error(error);
+    showMessage("auth-error", "Couldn't create or open the local account in this browser.", true);
   }
+});
+
+function getAccount() {
+  return readJSON(userDataKey(user), { points: 0, lifetime: 0, items: 0, claims: {}, redemptions: [] });
+}
+function saveAccount() { writeJSON(userDataKey(user), account); }
+function showApp() {
+  $("auth-view").hidden = !!user;
+  $("app-view").hidden = !user;
+  if (!user) return;
+  $("user-email").textContent = user;
+  account = getAccount();
+  renderRewards();
+  render();
+  renderHistory();
+}
+$("logout").addEventListener("click", () => {
+  stopScan();
+  localStorage.removeItem(SESSION_KEY);
+  user = null;
+  account = null;
+  $("auth-view").hidden = false;
+  $("app-view").hidden = true;
+});
+
+async function loadConfiguration() {
+  const [rewardResponse, binResponse] = await Promise.all([
+    fetch("./rewards.json", { cache: "no-store" }),
+    fetch("./bins.json", { cache: "no-store" })
+  ]);
+  if (!rewardResponse.ok || !binResponse.ok) throw new Error("Could not load rewards.json or bins.json.");
+  const rewardData = await rewardResponse.json();
+  const binData = await binResponse.json();
+  if (!Array.isArray(rewardData) || !binData || typeof binData !== "object") throw new Error("The rewards or bins JSON file has the wrong format.");
+  rewards = rewardData;
+  bins = binData;
 }
 
+function render() {
+  if (!account) return;
+  $("points").textContent = Number(account.points || 0).toLocaleString();
+  $("items").textContent = Number(account.items || 0).toLocaleString();
+  $("lifetime").textContent = Number(account.lifetime || 0).toLocaleString();
+  document.querySelectorAll(".reward").forEach(el => {
+    const reward = rewards.find(item => item.id === el.dataset.id);
+    if (!reward) return;
+    const button = el.querySelector(".btn");
+    const fill = el.querySelector(".fill");
+    button.disabled = Number(account.points || 0) < Number(reward.cost);
+    fill.style.width = Math.min(100, Number(account.points || 0) / Number(reward.cost) * 100) + "%";
+  });
+}
+function renderRewards() {
+  $("rewards").innerHTML = rewards.map(reward => {
+    const id = String(reward.id).replace(/[^a-zA-Z0-9_-]/g, "");
+    const name = escapeHtml(reward.name);
+    const emoji = escapeHtml(reward.emoji || "🎁");
+    const description = reward.description ? '<p class="muted small">' + escapeHtml(reward.description) + '</p>' : "";
+    return '<div class="reward" data-id="' + id + '"><div style="font-size:1.8rem">' + emoji + '</div><h3>' + name + '</h3>' + description + '<div class="cost">' + Number(reward.cost).toLocaleString() + ' pts</div><div class="bar"><div class="fill" style="height:100%;background:var(--g)"></div></div><button class="btn" type="button">Claim</button></div>';
+  }).join("");
+  document.querySelectorAll(".reward .btn").forEach(button => {
+    button.addEventListener("click", () => redeem(button.closest(".reward").dataset.id));
+  });
+}
+function renderHistory() {
+  const entries = account?.redemptions || [];
+  $("history").innerHTML = entries.length ? entries.slice().reverse().slice(0, 20).map(item =>
+    '<li><span>' + escapeHtml(item.name) + '</span><span class="muted">' + Number(item.cost).toLocaleString() + ' pts · Claimed</span></li>'
+  ).join("") : '<li class="muted">Nothing yet.</li>';
+}
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[ch]);
+}
+
+function parseSmartBinQR(rawText) {
+  let payload;
+  try { payload = JSON.parse(rawText); }
+  catch { throw new Error("That isn't valid JSON. Scan a SmartBin QR code."); }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("The QR must contain a JSON object.");
+  const keys = Object.keys(payload).sort();
+  if (keys.length !== 3 || keys[0] !== "app" || keys[1] !== "code" || keys[2] !== "points") {
+    throw new Error('The QR must contain exactly "app", "code" and "points".');
+  }
+  if (payload.app !== "smartbin") throw new Error('The QR "app" value must be "smartbin".');
+  if (typeof payload.code !== "string" || !/^BIN-\d{4}$/.test(payload.code)) throw new Error('The bin code must look like "BIN-0001".');
+  if (!Number.isSafeInteger(payload.points) || payload.points < 1 || payload.points > 100) throw new Error('"points" must be a whole number from 1 to 100.');
+  return payload;
+}
+function claimCode(rawText) {
+  if (!user || !account) throw new Error("Log in before scanning a bin.");
+  const payload = parseSmartBinQR(rawText);
+  const registered = bins[payload.code];
+  if (!registered) throw new Error("That bin code isn't in bins.json.");
+  if (payload.points !== registered.points) throw new Error("QR points don't match the registered points for this bin.");
+  const now = Date.now();
+  const previous = Number(account.claims[payload.code] || 0);
+  const cooldown = Number(registered.cooldownMinutes ?? 1440);
+  if (!Number.isFinite(cooldown) || cooldown < 1) throw new Error("This bin has an invalid cooldown in bins.json.");
+  const remaining = previous + cooldown * 60000 - now;
+  if (remaining > 0) throw new Error("You've already scanned this bin. Try again in " + Math.ceil(remaining / 60000) + " min.");
+  account.points = Number(account.points || 0) + registered.points;
+  account.lifetime = Number(account.lifetime || 0) + registered.points;
+  account.items = Number(account.items || 0) + 1;
+  account.claims[payload.code] = now;
+  saveAccount();
+  render();
+  return registered.points;
+}
+function redeem(id) {
+  const reward = rewards.find(item => item.id === id);
+  if (!reward) return showMessage("reward-msg", "That reward isn't available.", true);
+  if (!Number.isSafeInteger(Number(reward.cost)) || Number(reward.cost) < 1) return showMessage("reward-msg", "This reward has an invalid point cost.", true);
+  if (account.points < Number(reward.cost)) return showMessage("reward-msg", "You don't have enough points yet.", true);
+  account.points -= Number(reward.cost);
+  account.redemptions.push({ id: reward.id, name: reward.name, cost: Number(reward.cost), claimedAt: new Date().toISOString() });
+  saveAccount();
+  render();
+  renderHistory();
+  showMessage("reward-msg", "Claimed: " + reward.name + "!");
+}
+
+if ("BarcodeDetector" in window) {
+  try { detector = new BarcodeDetector({ formats: ["qr_code"] }); } catch (error) { console.warn("BarcodeDetector unavailable; using jsQR.", error); }
+}
 async function decodeFrame(source, width, height) {
   if (detector) {
     try {
-      const results = await detector.detect(source);
-      if (results.length > 0 && results[0].rawValue) return results[0].rawValue;
-    } catch (error) {
-      console.warn("Native QR detection failed; trying jsQR:", error);
-    }
+      const found = await detector.detect(source);
+      if (found.length && found[0].rawValue) return found[0].rawValue;
+    } catch (error) { console.warn("Native QR scan failed; trying jsQR.", error); }
   }
-
-  if (!window.jsQR || !width || !height || !context) return null;
-
+  if (!window.jsQR || !width || !height) return null;
+  const scale = Math.min(1, 900 / Math.max(width, height));
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
   try {
-    const scale = Math.min(1, 720 / Math.max(width, height));
-    const scaledWidth = Math.round(width * scale);
-    const scaledHeight = Math.round(height * scale);
-
-    canvas.width = scaledWidth;
-    canvas.height = scaledHeight;
-    context.drawImage(source, 0, 0, scaledWidth, scaledHeight);
-
-    const image = context.getImageData(0, 0, scaledWidth, scaledHeight);
-    const result = window.jsQR(image.data, scaledWidth, scaledHeight, {
-      inversionAttempts: "attemptBoth"
-    });
-
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
+    const image = context.getImageData(0, 0, canvas.width, canvas.height);
+    const result = window.jsQR(image.data, canvas.width, canvas.height, { inversionAttempts: "attemptBoth" });
     return result ? result.data : null;
-  } catch (error) {
-    console.error("QR frame decoding failed:", error);
-    return null;
-  }
+  } catch (error) { console.error("QR decode error:", error); return null; }
 }
-
 async function scanLoop() {
   if (!scanning) return;
-
   if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-    const rawText = await decodeFrame(video, video.videoWidth, video.videoHeight);
-
-    if (rawText && (rawText !== lastRaw || Date.now() - lastAt > 4000)) {
-      lastRaw = rawText;
-      lastAt = Date.now();
-      await claimCode(rawText);
+    const raw = await decodeFrame(video, video.videoWidth, video.videoHeight);
+    if (raw && (raw !== lastRaw || Date.now() - lastAt > 3000)) {
+      lastRaw = raw; lastAt = Date.now();
+      try {
+        const points = claimCode(raw);
+        showMessage("log-msg", "+" + points + " points added. Thanks for keeping it clean! 🌍");
+      } catch (error) {
+        showMessage("log-msg", error.message || "Couldn't read that QR code.", true);
+      }
+      stopScan();
+      return;
     }
   }
-
-  if (scanning) setTimeout(() => requestAnimationFrame(scanLoop), 150);
+  if (scanning) requestAnimationFrame(scanLoop);
 }
-
-async function openCamera() {
-  try {
-    return await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" } },
-      audio: false
-    });
-  } catch (error) {
-    if (error.name !== "OverconstrainedError" && error.name !== "NotFoundError") throw error;
-    return navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-  }
-}
-
 async function startScan() {
-  msg("log-msg", "");
-
-  if (!window.isSecureContext) {
-    msg("log-msg", "The camera only works on HTTPS or http://localhost. Open the deployed site using its HTTPS address.", true);
-    return;
-  }
-
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    msg("log-msg", "This browser can't access a camera. Try an updated version of Chrome or Safari.", true);
-    return;
-  }
-
-  if (!detector && !window.jsQR) {
-    msg("log-msg", "The QR reader library didn't load. Check your internet connection and refresh the page.", true);
-    return;
-  }
-
+  showMessage("log-msg", "");
+  if (!window.isSecureContext) return showMessage("log-msg", "Camera access needs localhost or HTTPS. Open this site at http://localhost.", true);
+  if (!navigator.mediaDevices?.getUserMedia) return showMessage("log-msg", "This browser doesn't support camera access.", true);
+  if (!detector && !window.jsQR) return showMessage("log-msg", "The QR scanning library didn't load. Check your internet connection and refresh.", true);
   try {
-    stream = await openCamera();
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
     video.srcObject = stream;
     $("scanner").hidden = false;
     $("scan-start").hidden = true;
     $("scan-stop").hidden = false;
-
     await video.play();
-
-    scanning = true;
-    lastRaw = "";
-    lastAt = 0;
-    msg("log-msg", "Scanning… hold a SmartBin QR code steady inside the square.");
+    scanning = true; lastRaw = ""; lastAt = 0;
+    showMessage("log-msg", "Scanning… hold a SmartBin QR code inside the square.");
     scanLoop();
   } catch (error) {
     stopScan();
     console.error("Camera start failed:", error);
-
-    if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
-      msg("log-msg", "Camera permission was blocked. Allow camera access in your browser's site settings, then try again.", true);
-    } else if (error.name === "NotFoundError" || error.name === "DevicesNotFoundError") {
-      msg("log-msg", "No camera was found on this device.", true);
-    } else if (error.name === "NotReadableError") {
-      msg("log-msg", "The camera is already being used by another app. Close that app and try again.", true);
-    } else {
-      msg("log-msg", "Couldn't open the camera. Check camera permission and try again.", true);
-    }
+    showMessage("log-msg", error.name === "NotAllowedError" ? "Camera permission was blocked. Allow camera access for localhost." : "Couldn't open the camera. Check camera permission.", true);
   }
 }
-
 function stopScan() {
   scanning = false;
-
-  if (stream) {
-    stream.getTracks().forEach(track => track.stop());
-    stream = null;
-  }
-
+  if (stream) { stream.getTracks().forEach(track => track.stop()); stream = null; }
   if (video) video.srcObject = null;
   if ($("scanner")) $("scanner").hidden = true;
   if ($("scan-start")) $("scan-start").hidden = false;
   if ($("scan-stop")) $("scan-stop").hidden = true;
 }
+$("scan-start").addEventListener("click", startScan);
+$("scan-stop").addEventListener("click", stopScan);
+window.addEventListener("pagehide", stopScan);
 
-$("scan-start").onclick = startScan;
-$("scan-stop").onclick = stopScan;
-
-/* ---- Rewards ---- */
-async function redeem(id) {
-  if (!user) return;
-
+(async function init() {
   try {
-    const result = await redeemRewardCall({ rewardId: id });
-    await loadUser();
-    msg("reward-msg", "Redeemed: " + result.data.reward + "! We'll email your reward soon.");
-    await loadHistory();
+    await loadConfiguration();
+    const savedSession = localStorage.getItem(SESSION_KEY);
+    if (savedSession && readJSON(USERS_KEY, {})[savedSession]) {
+      user = savedSession;
+      showApp();
+    } else {
+      localStorage.removeItem(SESSION_KEY);
+      $("auth-view").hidden = false;
+      $("app-view").hidden = true;
+    }
   } catch (error) {
-    console.error("Redemption failed:", error);
-    msg("reward-msg", backendMessage(error), true);
+    console.error(error);
+    showMessage("auth-error", "SmartBin couldn't load rewards.json or bins.json. Check that both files are in the project folder.", true);
   }
-
-  render();
-}
-
-async function loadHistory() {
-  const historyQuery = query(
-    collection(db, "users", user.uid, "redemptions"),
-    orderBy("createdAt", "desc"),
-    limit(20)
-  );
-
-  const snapshot = await getDocs(historyQuery);
-
-  $("history").innerHTML = snapshot.empty
-    ? '<li class="muted">Nothing yet.</li>'
-    : snapshot.docs.map(document => {
-        const reward = document.data();
-        return '<li><span>' + escapeHtml(reward.reward) + '</span><span class="muted">' +
-          Number(reward.cost || 0).toLocaleString() + ' pts · ' + escapeHtml(reward.status) +
-          '</span></li>';
-      }).join("");
-}
+})();
