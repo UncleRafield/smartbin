@@ -11,4 +11,9 @@
     "points": 25,
     "cooldownMinutes": 1440
   }
+},
+  "BIN-9001": {
+    "points": -10,
+    "cooldownMinutes": 1
+    }
 }
