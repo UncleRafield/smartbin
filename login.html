@@ -54,13 +54,28 @@
 });
 
     // Create Account (Sign Up) [1.1.1, 1.1.5]
-    document.getElementById("signUpBtn").onclick = function() {
-      statusEl.textContent = "Status: Creating account...";
-      auth.createUserWithEmailAndPassword(emailEl.value, passwordEl.value)
-        .then(() => statusEl.textContent = "Status: Account created successfully!")
-        .catch((error) => {
-          statusEl.textContent = "Error: " + error.message;
-          statusEl.style.color = "red";
+   document.getElementById("signUpBtn").onclick = function() {
+  statusEl.textContent = "Status: Creating account...";
+  const uniqueCode = generateSpecialCode();
+
+  auth.createUserWithEmailAndPassword(emailEl.value, passwordEl.value)
+    .then((userCredential) => {
+      // Step 1: Save the code to their profile first [1.1.1]
+      return userCredential.user.updateProfile({
+        displayName: uniqueCode
+      });
+    })
+    .then(() => {
+      // Step 2: Now that it's successfully saved, redirect! [1.1.1]
+      statusEl.textContent = "Status: Code saved! Redirecting...";
+      window.location.href = "dashboard.html";
+    })
+    .catch((error) => {
+      statusEl.textContent = "Error: " + error.message;
+      statusEl.style.color = "red";
+    });
+};
+
           // Function to generate a random 4-character alphanumeric code
 function generateSpecialCode() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -98,16 +113,17 @@ document.getElementById("signUpBtn").onclick = function() {
     };
 
     // Log In [1.1.1, 1.1.5]
-    document.getElementById("signInBtn").onclick = function() {
-      statusEl.textContent = "Status: Logging in...";
-      auth.signInWithEmailAndPassword(emailEl.value, passwordEl.value)
-        .then(() => statusEl.textContent = "Status: Logged in successfully!")
-        .catch((error) => {
-          statusEl.textContent = "Error: " + error.message;
-          statusEl.style.color = "red";
-        });
-    };
-
+   document.getElementById("signInBtn").onclick = function() {
+  statusEl.textContent = "Status: Logging in...";
+  auth.signInWithEmailAndPassword(emailEl.value, passwordEl.value)
+    .then(() => {
+      window.location.href = "dashboard.html";
+    })
+    .catch((error) => {
+      statusEl.textContent = "Error: " + error.message;
+      statusEl.style.color = "red";
+    });
+};
     // Log Out
     document.getElementById("signOutBtn").onclick = function() {
       auth.signOut()
