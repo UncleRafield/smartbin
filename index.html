@@ -24,7 +24,7 @@
       <button id="auth-submit" class="btn" type="submit">Log in</button>
     </form>
   </div>
-  <p class="ai-note style="color:#102414>This site is AI generated.</p>
+  <p class="ai-note">This site is AI generated.</p>
 </main>
 
 <!-- APP -->
@@ -45,7 +45,7 @@
 
     <section class="card">
       <h2>Scan a SmartBin code</h2>
-      <p class="muted">Scan the QR code on a SmartBin to add its points to your account. Each code can only be claimed once per rule set by the bin (once ever, or once a day).</p>
+      <p class="muted">Point your camera at the QR code on a SmartBin to add its points to your account. Each code can only be claimed once per rule set by the bin (once ever, or once a day).</p>
       <div class="scanner" id="scanner" hidden>
         <video id="video" playsinline muted></video>
         <div class="reticle"></div>
@@ -53,7 +53,6 @@
       <div class="row">
         <button id="scan-start" class="btn" type="button">Open camera</button>
         <button id="scan-stop" class="btn ghost" type="button" hidden>Stop</button>
-        <label class="btn ghost filebtn">Upload QR image<input id="qr-file" type="file" accept="image/*" hidden></label>
       </div>
       <p id="log-msg" class="msg" role="status"></p>
     </section>
