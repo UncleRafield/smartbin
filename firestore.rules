@@ -1,0 +1,47 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Bin codes: you create these yourself in the Firebase console (see README). Users can read one
+    // code if they know its id, but can't list them or change them.
+    match /codes/{code} {
+      allow get: if request.auth != null;
+      allow list, write: if false;
+    }
+
+    match /users/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow create: if request.auth != null && request.auth.uid == uid
+                    && request.resource.data.points == 0;
+
+      // Points can go down (redeeming) or up only by exactly the value of a code claimed in the same write.
+      allow update: if request.auth != null && request.auth.uid == uid
+        && request.resource.data.points >= 0
+        && (
+          request.resource.data.points <= resource.data.points
+          || (
+            !exists(/databases/$(database)/documents/users/$(uid)/claims/$(request.resource.data.lastClaimId))
+            && existsAfter(/databases/$(database)/documents/users/$(uid)/claims/$(request.resource.data.lastClaimId))
+            && getAfter(/databases/$(database)/documents/users/$(uid)/claims/$(request.resource.data.lastClaimId)).data.points
+               == request.resource.data.points - resource.data.points
+          )
+        );
+
+      // One claim per code (or per code per UTC day if the code has daily == true).
+      match /claims/{claimId} {
+        allow read: if request.auth != null && request.auth.uid == uid;
+        allow create: if request.auth != null && request.auth.uid == uid
+          && request.resource.data.points == get(/databases/$(database)/documents/codes/$(request.resource.data.code)).data.points
+          && claimId == (
+            get(/databases/$(database)/documents/codes/$(request.resource.data.code)).data.daily == true
+              ? request.resource.data.code + '_' + string(request.time.year()) + '-' + string(request.time.month()) + '-' + string(request.time.day())
+              : request.resource.data.code
+          );
+      }
+
+      match /redemptions/{id} {
+        allow read, create: if request.auth != null && request.auth.uid == uid;
+      }
+    }
+  }
+}
