@@ -1,27 +1,25 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
+    // All balance changes and QR claims are performed by trusted Cloud Functions.
+    // The Admin SDK bypasses these rules; browsers cannot write account data.
     match /users/{uid} {
       allow read: if request.auth != null && request.auth.uid == uid;
-      allow create: if request.auth != null && request.auth.uid == uid
-                    && request.resource.data.points == 0;
+      allow create, update, delete: if false;
 
-      // Points can go down (redeeming), or go up by at most 100 per scan with at least 10 seconds between scans.
-      allow update: if request.auth != null && request.auth.uid == uid
-        && request.resource.data.points >= 0
-        && (
-          request.resource.data.points <= resource.data.points
-          || (
-            request.resource.data.points - resource.data.points <= 100
-            && request.resource.data.lastScanAt == request.time
-            && (!('lastScanAt' in resource.data) || request.time > resource.data.lastScanAt + duration.value(10, 's'))
-          )
-        );
-
-      match /redemptions/{id} {
-        allow read, create: if request.auth != null && request.auth.uid == uid;
+      match /binClaims/{code} {
+        allow read, write: if false;
       }
+
+      match /redemptions/{redemptionId} {
+        allow read: if request.auth != null && request.auth.uid == uid;
+        allow create, update, delete: if false;
+      }
+    }
+
+    // Registered QR codes are server-managed and never readable by browsers.
+    match /codes/{code} {
+      allow read, write: if false;
     }
   }
 }
