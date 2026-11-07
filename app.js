@@ -83,9 +83,18 @@ function backendMessage(error) {
   if (code.includes("failed-precondition")) return error.message || "This action can't be completed right now.";
   if (code.includes("invalid-argument")) return error.message || "That QR code isn't a valid SmartBin code.";
   if (code.includes("permission-denied")) return "Firebase denied this action. Check that the latest backend and Firestore rules have been deployed.";
-  if (code.includes("unavailable") || code.includes("not-found")) return error.message || "The SmartBin server isn't available yet. Try again shortly.";
+  if (code.includes("unavailable")) return "The SmartBin server is temporarily unavailable. Try again shortly.";
+  if (code.includes("functions/internal") || code === "internal") {
+    console.error("Firebase callable function returned INTERNAL:", {
+      code: error.code,
+      message: error.message,
+      details: error.details
+    });
+    return "The SmartBin server crashed while processing this request (functions/internal). This is a backend deployment/runtime problem, not a QR-code problem. Check Firebase Console > Functions > claimBin > Logs.";
+  }
+  if (code.includes("functions/") && error.message) return error.message;
 
-  return error.message || "Something went wrong. Please try again.";
+  return error.message || (code ? code + ": Something went wrong. Check the browser console for details." : "Something went wrong. Please try again.");
 }
 
 /* ---- Session ---- */
