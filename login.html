@@ -52,6 +52,16 @@
         statusEl.textContent = "Status: Not logged in.";
       }
 });
+             // Function to generate a random 4-character alphanumeric code
+function generateSpecialCode() {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let code = "";
+  for (let i = 0; i < 4; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
+
 
     // Create Account (Sign Up) [1.1.1, 1.1.5]
    document.getElementById("signUpBtn").onclick = function() {
@@ -75,42 +85,6 @@
       statusEl.style.color = "red";
     });
 };
-
-          // Function to generate a random 4-character alphanumeric code
-function generateSpecialCode() {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  let code = "";
-  for (let i = 0; i < 4; i++) {
-    code += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return code;
-}
-
-// Update your Create Account (Sign Up) click function:
-document.getElementById("signUpBtn").onclick = function() {
-  statusEl.textContent = "Status: Creating account...";
-  
-  const uniqueCode = generateSpecialCode(); // Create the code
-
-  auth.createUserWithEmailAndPassword(emailEl.value, passwordEl.value)
-    .then((userCredential) => {
-      // Save the 4-character code to the user's display name [1.1.1]
-      return userCredential.user.updateProfile({
-        displayName: uniqueCode
-      });
-    })
-    .then(() => {
-      statusEl.textContent = "Status: Account created successfully!";
-      // The onAuthStateChanged listener will automatically redirect to dashboard.html [1.1.8]
-    })
-    .catch((error) => {
-      statusEl.textContent = "Error: " + error.message;
-      statusEl.style.color = "red";
-    });
-};
-
-        });
-    };
 
     // Log In [1.1.1, 1.1.5]
    document.getElementById("signInBtn").onclick = function() {
