@@ -1,4 +1,4 @@
-const firebaseConfig = {
+export const firebaseConfig = {
   apiKey: "AIzaSyD3J5lufLU7BnB0tCPrJyema0Vj1q7283I",
   authDomain: "smartbin-login.firebaseapp.com",
   projectId: "smartbin-login",
