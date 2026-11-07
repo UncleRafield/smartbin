@@ -1,41 +1,93 @@
+
+<!DOCTYPE html>
+<html>
 <head>
+  <title>login / sign up</title>
   <link rel="spreadsheet" href="style.css">
 </head>
-<body>
-  <div>
-  <h3>Sign In / Register</h3>
-  <input type="email" id="email" placeholder="Email" />
-  <input type="password" id="password" placeholder="Password" />
+<body style="font-family: sans-serif; padding: 20px; max-width: 400px; margin: auto;">
+  <h2>SmartBin Login & Sign Up</h2>
   
-  <button id="signUpBtn">Sign Up</button>
-  <button id="signInBtn">Sign In</button>
-  <button id="signOutBtn" style="display: none;">Sign Out</button>
+  <label>Email:</label>
+  <input type="email" id="email" style="display:block; width:100%; margin: 8px 0; padding: 8px;"><br>
   
-  <p id="status">Not logged in.</p>
-</div>
+  <label>Password:</label>
+  <input type="password" id="password" placeholder="Min 6 characters" style="display:block; width:100%; margin: 8px 0; padding: 8px;"><br>
+  
+  <button id="signUpBtn" style="padding: 10px; margin-right: 5px;">Create Account</button>
+  <button id="signInBtn" style="padding: 10px; margin-right: 5px;">Log In</button>
+  <button id="signOutBtn" style="padding: 10px; display:none; background-color: red; color: white; border: none;">Log Out</button>
 
-  <script type="module">
-  // Import the functions you need from the SDKs you need
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/13.2.0/firebase-app.js";
-  import { getAnalytics } from "https://www.gstatic.com/firebasejs/13.2.0/firebase-analytics.js";
-  // TODO: Add SDKs for Firebase products that you want to use
-  // https://firebase.google.com/docs/web/setup#available-libraries
+  <p id="status" style="font-weight: bold; margin-top: 25px; color: blue; padding: 10px; background: #eee; border-radius: 4px;">Status: Loading...</p>
 
-  // Your web app's Firebase configuration
-  // For Firebase JS SDK v7.20.0 and later, measurementId is optional
-  const firebaseConfig = {
-    apiKey: "AIzaSyD3J5lufLU7BnB0tCPrJyema0Vj1q7283I",
-    authDomain: "smartbin-login.firebaseapp.com",
-    projectId: "smartbin-login",
-    storageBucket: "smartbin-login.firebasestorage.app",
-    messagingSenderId: "304365155248",
-    appId: "1:304365155248:web:b91d4d78de06f0962f1c75",
-    measurementId: "G-9DX7S38CVP"
-  };
+  <!-- Firebase Compat SDKs (No special server required to run) -->
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
 
-  // Initialize Firebase
-  const app = initializeApp(firebaseConfig);
-  const analytics = getAnalytics(app);
-</script>
-  <p css="colour:grey;">Login made with AI</p>
+  <script>
+    // Replace with your actual keys from Firebase Project Settings [2.1.1]
+    const firebaseConfig = {
+      apiKey: "AIzaSyD3J5lufLU7BnB0tCPrJyema0Vj1q7283I",
+      authDomain: "smartbin-login.firebaseapp.com",
+      projectId: "smartbin-login",
+      storageBucket: "smartbin-login.firebasestorage.app",
+      messagingSenderId: "304365155248",
+      appId: "1:304365155248:web:b91d4d78de06f0962f1c75"
+    };
+
+    // Initialize Firebase
+    firebase.initializeApp(firebaseConfig);
+    const auth = firebase.auth();
+
+    const emailEl = document.getElementById("email");
+    const passwordEl = document.getElementById("password");
+    const statusEl = document.getElementById("status");
+
+    // Monitor login state [1.1.8]
+    auth.onAuthStateChanged((user) => {
+      if (user) {
+        statusEl.textContent = "Status: Logged in as " + user.email;
+        statusEl.style.color = "green";
+        document.getElementById("signOutBtn").style.display = "inline";
+      } else {
+        statusEl.textContent = "Status: Not logged in.";
+        statusEl.style.color = "blue";
+        document.getElementById("signOutBtn").style.display = "none";
+      }
+    });
+
+    // Create Account (Sign Up) [1.1.1, 1.1.5]
+    document.getElementById("signUpBtn").onclick = function() {
+      statusEl.textContent = "Status: Creating account...";
+      auth.createUserWithEmailAndPassword(emailEl.value, passwordEl.value)
+        .then(() => statusEl.textContent = "Status: Account created successfully!")
+        .catch((error) => {
+          statusEl.textContent = "Error: " + error.message;
+          statusEl.style.color = "red";
+        });
+    };
+
+    // Log In [1.1.1, 1.1.5]
+    document.getElementById("signInBtn").onclick = function() {
+      statusEl.textContent = "Status: Logging in...";
+      auth.signInWithEmailAndPassword(emailEl.value, passwordEl.value)
+        .then(() => statusEl.textContent = "Status: Logged in successfully!")
+        .catch((error) => {
+          statusEl.textContent = "Error: " + error.message;
+          statusEl.style.color = "red";
+        });
+    };
+
+    // Log Out
+    document.getElementById("signOutBtn").onclick = function() {
+      auth.signOut()
+        .then(() => statusEl.textContent = "Status: Logged out.")
+        .catch((error) => {
+          statusEl.textContent = "Error: " + error.message;
+          statusEl.style.color = "red";
+        });
+    };
+  </script>
+  <p>used AI</p>
 </body>
+</html>
