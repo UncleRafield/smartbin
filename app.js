@@ -4,6 +4,7 @@ import { getAuth, onAuthStateChanged, createUserWithEmailAndPassword, signInWith
 import { getFirestore, doc, getDoc, setDoc, runTransaction, addDoc, collection, query, orderBy, limit, getDocs, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
+import { REWARDS, BINS } from "./store.js";
 
 if (!firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith("YOUR_")) {
   document.addEventListener("DOMContentLoaded", () => {
@@ -15,15 +16,6 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 /* ---- Settings ---- */
-// Fallback list, used only if the 'rewards' collection in Firestore is empty.
-const DEFAULT_REWARDS = [
-  { id: "bottle", name: "Reusable bottle", emoji: "🥤", cost: 2000 },
-  { id: "gc5",    name: "£5 gift card",    emoji: "🎁", cost: 3000 },
-  { id: "gc10",   name: "£10 gift card",   emoji: "💷", cost: 6500 },
-  { id: "gc25",   name: "£25 gift card",   emoji: "💳", cost: 17000 },
-  { id: "tree",   name: "Plant a tree",    emoji: "🌳", cost: 25000 },
-];
-let REWARDS = DEFAULT_REWARDS;
 const $ = id => document.getElementById(id);
 let mode = "login", user = null, data = null;
 
@@ -82,22 +74,11 @@ onAuthStateChanged(auth, async u => {
   if (u) {
     $("user-email").textContent = u.email;
     await loadUser();
-    await loadRewards();
     renderRewards(); render(); loadHistory();
   } else {
     $("auth-form").reset();
   }
 });
-
-async function loadRewards() {
-  try {
-    const snap = await getDocs(collection(db, "rewards"));
-    const list = snap.docs.map(d => ({ id: d.id, ...d.data() }))
-      .filter(r => r.active !== false && r.name && Number.isFinite(r.cost))
-      .sort((a, b) => (a.order ?? a.cost) - (b.order ?? b.cost));
-    if (list.length) REWARDS = list.map(r => ({ ...r, emoji: r.emoji || "🎁" }));
-  } catch (e) { /* keep defaults */ }
-}
 
 async function loadUser() {
   const ref = doc(db, "users", user.uid);
@@ -135,36 +116,40 @@ function msg(id, text, err) { const el = $(id); el.textContent = text; el.classN
 /* ---- Actions ---- */
 /* ---- QR codes ----
    A SmartBin QR code contains JSON like:  {"app":"smartbin","code":"BIN-0001","points":10}
-   The points shown in the QR must match the code stored in Firestore (codes/BIN-0001),
-   so editing a QR image or inventing codes does not work. */
+   The bin must be listed in store.js. Points awarded always come from store.js. */
 async function claimCode(raw) {
   let p;
   try { p = JSON.parse(raw); } catch { return msg("log-msg", "That QR code isn't a SmartBin code.", true); }
-  if (!p || p.app !== "smartbin" || typeof p.code !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(p.code) || !Number.isInteger(p.points) || p.points <= 0)
-    return msg("log-msg", "That QR code isn't a valid SmartBin code.", true);
-  const codeRef = doc(db, "codes", p.code);
+  if (!p || p.app !== "smartbin" || typeof p.code !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(p.code))
+    return msg("log-msg", "That QR code isn't a SmartBin code.", true);
+  const bin = BINS[p.code];
+  if (!bin) return msg("log-msg", `Bin "${p.code}" isn't listed in store.js. Add it there and redeploy.`, true);
+  const pts = Math.min(100, Math.floor(Number(bin.points)));
+  if (!(pts > 0)) return msg("log-msg", `Bin "${p.code}" has no valid points value in store.js.`, true);
+  const cooldownMin = Math.max(1, Number(bin.cooldownMinutes) || 1);
   const userRef = doc(db, "users", user.uid);
+  const claimRef = doc(db, "users", user.uid, "claims", p.code);
   try {
     data = await runTransaction(db, async tx => {
-      const codeSnap = await tx.get(codeRef);
-      if (!codeSnap.exists() || codeSnap.data().points !== p.points) throw new Error("This code isn't valid or has expired.");
-      const cooldownMin = codeSnap.data().cooldownMinutes ?? 1440; // default: once a day per bin
-      const claimId = p.code;
-      const claimRef = doc(db, "users", user.uid, "claims", claimId);
       const prev = await tx.get(claimRef);
+      const us = await tx.get(userRef);
+      if (!us.exists()) throw new Error("Your account record is missing. Log out and back in.");
       if (prev.exists() && prev.data().at) {
         const waitMs = prev.data().at.toMillis() + cooldownMin * 60000 - Date.now();
-        if (waitMs > 0) throw new Error(`You've already scanned this bin. Try again in ${waitMs > 3600000 ? Math.ceil(waitMs / 3600000) + " h" : Math.ceil(waitMs / 60000) + " min"}.`);
+        if (waitMs > 0) throw new Error(`You've scanned this bin recently. Try again in ${waitMs > 3600000 ? Math.ceil(waitMs / 3600000) + " h" : Math.ceil(waitMs / 60000) + " min"}.`);
       }
-      const d = (await tx.get(userRef)).data();
-      tx.set(claimRef, { code: p.code, points: p.points, at: serverTimestamp() });
-      const next = { ...d, points: d.points + p.points, lifetime: d.lifetime + p.points, items: d.items + 1, lastClaimId: claimId };
+      const d = us.data();
+      tx.set(claimRef, { code: p.code, points: pts, at: serverTimestamp() });
+      const next = { ...d, points: (d.points || 0) + pts, lifetime: (d.lifetime || 0) + pts, items: (d.items || 0) + 1, lastClaimId: p.code };
       tx.update(userRef, next);
       return next;
     });
-    msg("log-msg", `+${p.points} points added. Thanks for keeping it clean! 🌍`);
+    stopScan();
+    msg("log-msg", `+${pts} points added. Thanks for keeping it clean! 🌍`);
   } catch (e) {
-    msg("log-msg", e.code === "permission-denied" ? "Couldn't verify that code." : e.message, true);
+    stopScan();
+    console.error("Scan failed:", e);
+    msg("log-msg", e.code === "permission-denied" ? "Firestore refused the update (permission-denied). Publish the latest firestore.rules in Firebase, then try again." : ((e.code ? e.code + ": " : "") + (e.message || "Something went wrong.")), true);
   }
   render();
 }
