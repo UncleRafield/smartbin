@@ -1,0 +1,37 @@
+[
+  {
+    "id": "bottle",
+    "name": "Reusable bottle",
+    "emoji": "🥤",
+    "description": "A reusable bottle deal.",
+    "cost": 2000
+  },
+  {
+    "id": "gc5",
+    "name": "£5 gift card",
+    "emoji": "🎁",
+    "description": "A £5 gift card reward.",
+    "cost": 3000
+  },
+  {
+    "id": "gc10",
+    "name": "£10 gift card",
+    "emoji": "💷",
+    "description": "A £10 gift card reward.",
+    "cost": 6500
+  },
+  {
+    "id": "gc25",
+    "name": "£25 gift card",
+    "emoji": "💳",
+    "description": "A £25 gift card reward.",
+    "cost": 17000
+  },
+  {
+    "id": "tree",
+    "name": "Plant a tree",
+    "emoji": "🌳",
+    "description": "Contribute to planting a tree.",
+    "cost": 25000
+  }
+]
