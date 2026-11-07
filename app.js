@@ -126,24 +126,28 @@ async function claimCode(raw) {
   if (!bin) return msg("log-msg", `Bin "${p.code}" isn't listed in store.js. Add it there and redeploy.`, true);
   const pts = Math.min(100, Math.floor(Number(bin.points)));
   if (!(pts > 0)) return msg("log-msg", `Bin "${p.code}" has no valid points value in store.js.`, true);
-  const cooldownMin = Math.max(1, Number(bin.cooldownMinutes) || 1);
+  const cooldownMin = Math.max(0, Number(bin.cooldownMinutes) || 0);
   const userRef = doc(db, "users", user.uid);
-  const claimRef = doc(db, "users", user.uid, "claims", p.code);
   try {
-    data = await runTransaction(db, async tx => {
-      const prev = await tx.get(claimRef);
+    await runTransaction(db, async tx => {
       const us = await tx.get(userRef);
       if (!us.exists()) throw new Error("Your account record is missing. Log out and back in.");
-      if (prev.exists() && prev.data().at) {
-        const waitMs = prev.data().at.toMillis() + cooldownMin * 60000 - Date.now();
-        if (waitMs > 0) throw new Error(`You've scanned this bin recently. Try again in ${waitMs > 3600000 ? Math.ceil(waitMs / 3600000) + " h" : Math.ceil(waitMs / 60000) + " min"}.`);
-      }
       const d = us.data();
-      tx.set(claimRef, { code: p.code, points: pts, at: serverTimestamp() });
-      const next = { ...d, points: (d.points || 0) + pts, lifetime: (d.lifetime || 0) + pts, items: (d.items || 0) + 1, lastClaimId: p.code };
-      tx.update(userRef, next);
-      return next;
+      const last = (d.binScans || {})[p.code] || 0;
+      const waitMs = last + cooldownMin * 60000 - Date.now();
+      if (waitMs > 0) throw new Error(`You've scanned this bin recently. Try again in ${waitMs > 3600000 ? Math.ceil(waitMs / 3600000) + " h" : waitMs > 60000 ? Math.ceil(waitMs / 60000) + " min" : Math.ceil(waitMs / 1000) + " s"}.`);
+      const lastAny = d.lastScanAt && d.lastScanAt.toMillis ? d.lastScanAt.toMillis() : 0;
+      if (Date.now() - lastAny < 12000) throw new Error("Slow down! Wait a few seconds between scans.");
+      tx.update(userRef, {
+        points: (d.points || 0) + pts,
+        lifetime: (d.lifetime || 0) + pts,
+        items: (d.items || 0) + 1,
+        binScans: { ...(d.binScans || {}), [p.code]: Date.now() },
+        lastScanAt: serverTimestamp()
+      });
     });
+    const fresh = await getDoc(userRef);
+    data = fresh.data();
     stopScan();
     msg("log-msg", `+${pts} points added. Thanks for keeping it clean! 🌍`);
   } catch (e) {
