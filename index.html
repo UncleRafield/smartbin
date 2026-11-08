@@ -45,10 +45,10 @@
 
     <section class="card">
       <h2>Enter a SmartBin code</h2>
-      <p class="muted">Enter the 5-digit code printed on the bin. The first 2 digits identify the bin and the last 3 digits are the points.</p>
+      <p class="muted">Enter the 5-digit code printed on the bin.</p>
       <form id="code-form">
         <label for="bin-code">5-digit bin code</label>
-        <input id="bin-code" type="text" inputmode="numeric" pattern="[0-9]{5}" maxlength="5" minlength="5" placeholder="e.g. 01030" autocomplete="off" required>
+        <input id="bin-code" type="text" inputmode="numeric" pattern="[0-9]{5}" maxlength="5" minlength="5" placeholder="enter code" autocomplete="off" required>
         <button class="btn" type="submit">Add points</button>
       </form>
       <p id="log-msg" class="msg" role="status"></p>
