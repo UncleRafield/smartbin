@@ -9,14 +9,6 @@ let mode = "login";
 let user = null;
 let account = null;
 let rewards = [];
-let stream = null;
-let scanning = false;
-let detector = null;
-let lastRaw = "";
-let lastAt = 0;
-const video = $("video");
-const canvas = document.createElement("canvas");
-const context = canvas.getContext("2d", { willReadFrequently: true });
 
 function readJSON(key, fallback) {
   try { const value = JSON.parse(localStorage.getItem(key)); return value ?? fallback; }
@@ -155,29 +147,20 @@ function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" })[ch]);
 }
 
-function parseSmartBinQR(rawText) {
-  let payload;
-  try { payload = JSON.parse(rawText); }
-  catch { throw new Error("That isn't valid JSON. Scan a SmartBin QR code."); }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("The QR must contain a JSON object.");
-  const keys = Object.keys(payload).sort();
-  if (keys.length !== 3 || keys[0] !== "app" || keys[1] !== "code" || keys[2] !== "points") {
-    throw new Error('The QR must contain exactly "app", "code" and "points".');
-  }
-  if (payload.app !== "smartbin") throw new Error('The QR "app" value must be "smartbin".');
-  if (typeof payload.code !== "string" || !/^BIN-\d{4}$/.test(payload.code)) throw new Error('The bin code must look like "BIN-0001".');
-  if (!Number.isSafeInteger(payload.points) || payload.points < 1 || payload.points > 100) throw new Error('"points" must be a whole number from 1 to 100.');
-  return payload;
-}
 function claimCode(rawText) {
-  if (!user || !account) throw new Error("Log in before scanning a bin.");
-  const payload = parseSmartBinQR(rawText);
-  account.points = Number(account.points || 0) + payload.points;
-  account.lifetime = Number(account.lifetime || 0) + payload.points;
+  if (!user || !account) throw new Error("Log in before entering a bin code.");
+  const code = String(rawText).trim();
+  if (!/^\\d{5}$/.test(code)) throw new Error("Enter a 5-digit code, for example 01030.");
+  const binNumber = Number(code.slice(0, 2));
+  const points = Number(code.slice(2, 5));
+  if (binNumber < 1 || binNumber > 99) throw new Error("The bin number must be between 01 and 99.");
+  if (points < 1 || points > 999) throw new Error("The points amount must be between 001 and 999.");
+  account.points = Number(account.points || 0) + points;
+  account.lifetime = Number(account.lifetime || 0) + points;
   account.items = Number(account.items || 0) + 1;
   saveAccount();
   render();
-  return payload.points;
+  return { binNumber, points };
 }
 function redeem(id) {
   const reward = rewards.find(item => item.id === id);
@@ -192,77 +175,18 @@ function redeem(id) {
   showMessage("reward-msg", "Claimed: " + reward.name + "!");
 }
 
-if ("BarcodeDetector" in window) {
-  try { detector = new BarcodeDetector({ formats: ["qr_code"] }); } catch (error) { console.warn("BarcodeDetector unavailable; using jsQR.", error); }
-}
-async function decodeFrame(source, width, height) {
-  if (detector) {
-    try {
-      const found = await detector.detect(source);
-      if (found.length && found[0].rawValue) return found[0].rawValue;
-    } catch (error) { console.warn("Native QR scan failed; trying jsQR.", error); }
-  }
-  if (!window.jsQR || !width || !height) return null;
-  const scale = Math.min(1, 900 / Math.max(width, height));
-  canvas.width = Math.round(width * scale);
-  canvas.height = Math.round(height * scale);
-  try {
-    context.drawImage(source, 0, 0, canvas.width, canvas.height);
-    const image = context.getImageData(0, 0, canvas.width, canvas.height);
-    const result = window.jsQR(image.data, canvas.width, canvas.height, { inversionAttempts: "attemptBoth" });
-    return result ? result.data : null;
-  } catch (error) { console.error("QR decode error:", error); return null; }
-}
-async function scanLoop() {
-  if (!scanning) return;
-  if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-    const raw = await decodeFrame(video, video.videoWidth, video.videoHeight);
-    if (raw && (raw !== lastRaw || Date.now() - lastAt > 3000)) {
-      lastRaw = raw; lastAt = Date.now();
-      try {
-        const points = claimCode(raw);
-        showMessage("log-msg", "+" + points + " points added. Thanks for keeping it clean! 🌍");
-      } catch (error) {
-        showMessage("log-msg", error.message || "Couldn't read that QR code.", true);
-      }
-      stopScan();
-      return;
-    }
-  }
-  if (scanning) requestAnimationFrame(scanLoop);
-}
-async function startScan() {
+$("code-form").addEventListener("submit", event => {
+  event.preventDefault();
   showMessage("log-msg", "");
-  if (!window.isSecureContext) return showMessage("log-msg", "Camera access needs localhost or HTTPS. Open this site at http://localhost.", true);
-  if (!navigator.mediaDevices?.getUserMedia) return showMessage("log-msg", "This browser doesn't support camera access.", true);
-  if (!detector && !window.jsQR) return showMessage("log-msg", "The QR scanning library didn't load. Check your internet connection and refresh.", true);
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
-    video.srcObject = stream;
-    $("scanner").hidden = false;
-    $("scan-start").hidden = true;
-    $("scan-stop").hidden = false;
-    await video.play();
-    scanning = true; lastRaw = ""; lastAt = 0;
-    showMessage("log-msg", "Scanning… hold a SmartBin QR code inside the square.");
-    scanLoop();
+    const result = claimCode($("bin-code").value);
+    showMessage("log-msg", "Bin " + String(result.binNumber).padStart(2, "0") + " accepted: +" + result.points + " points. 🌍");
+    $("code-form").reset();
+    $("bin-code").focus();
   } catch (error) {
-    stopScan();
-    console.error("Camera start failed:", error);
-    showMessage("log-msg", error.name === "NotAllowedError" ? "Camera permission was blocked. Allow camera access for localhost." : "Couldn't open the camera. Check camera permission.", true);
+    showMessage("log-msg", error.message || "That code couldn't be accepted.", true);
   }
-}
-function stopScan() {
-  scanning = false;
-  if (stream) { stream.getTracks().forEach(track => track.stop()); stream = null; }
-  if (video) video.srcObject = null;
-  if ($("scanner")) $("scanner").hidden = true;
-  if ($("scan-start")) $("scan-start").hidden = false;
-  if ($("scan-stop")) $("scan-stop").hidden = true;
-}
-$("scan-start").addEventListener("click", startScan);
-$("scan-stop").addEventListener("click", stopScan);
-window.addEventListener("pagehide", stopScan);
+});
 
 (async function init() {
   try {
