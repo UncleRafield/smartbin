@@ -95,7 +95,6 @@ function showApp() {
   renderHistory();
 }
 $("logout").addEventListener("click", () => {
-  stopScan();
   localStorage.removeItem(SESSION_KEY);
   user = null;
   account = null;
@@ -150,7 +149,7 @@ function escapeHtml(value) {
 function claimCode(rawText) {
   if (!user || !account) throw new Error("Log in before entering a bin code.");
   const code = String(rawText).trim();
-  if (!/^\\d{5}$/.test(code)) throw new Error("Enter a 5-digit code, for example 01030.");
+  if (!/^\d{5}$/.test(code)) throw new Error("Enter a 5-digit code, for example 01030.");
   const binNumber = Number(code.slice(0, 2));
   const points = Number(code.slice(2, 5));
   if (binNumber < 1 || binNumber > 99) throw new Error("The bin number must be between 01 and 99.");
