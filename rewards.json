@@ -8,23 +8,23 @@
   },
   {
     "id": "gc5",
-    "name": "£5 gift card",
+    "name": "mystery prize",
     "emoji": "🎁",
-    "description": "A £5 gift card reward.",
+    "description": "A mystery reward.",
     "cost": 3000
   },
   {
     "id": "gc10",
-    "name": "£10 gift card",
+    "name": "10% discount at Sainsbury's",
     "emoji": "💷",
-    "description": "A £10 gift card reward.",
+    "description": "A 10% at a Sainsbury's near you.",
     "cost": 6500
   },
   {
     "id": "gc25",
-    "name": "£25 gift card",
+    "name": "25% discount at Joe's café",
     "emoji": "💳",
-    "description": "A £25 gift card reward.",
+    "description": "A 25% discount for this café.",
     "cost": 17000
   },
   {
