@@ -172,7 +172,7 @@ function parseSmartBinQR(rawText) {
   }
   if (payload.app !== "smartbin") throw new Error('The QR "app" value must be "smartbin".');
   if (typeof payload.code !== "string" || !/^BIN-\d{4}$/.test(payload.code)) throw new Error('The bin code must look like "BIN-0001".');
-  if (!Number.isSafeInteger(payload.points) || payload.points < 1 || payload.points > 100) throw new Error('"points" must be a whole number from 1 to 100.');
+  if (!Number.isSafeInteger(payload.points) || payload.points < -99999 || payload.points > 99999) throw new Error('"points" must be a whole number from 1 to 100.');
   return payload;
 }
 function claimCode(rawText) {
