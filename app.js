@@ -9,7 +9,6 @@ let mode = "login";
 let user = null;
 let account = null;
 let rewards = [];
-let bins = {};
 let stream = null;
 let scanning = false;
 let detector = null;
@@ -113,16 +112,11 @@ $("logout").addEventListener("click", () => {
 });
 
 async function loadConfiguration() {
-  const [rewardResponse, binResponse] = await Promise.all([
-    fetch("./rewards.json", { cache: "no-store" }),
-    fetch("./bins.json", { cache: "no-store" })
-  ]);
-  if (!rewardResponse.ok || !binResponse.ok) throw new Error("Could not load rewards.json or bins.json.");
+  const rewardResponse = await fetch("./rewards.json", { cache: "no-store" });
+  if (!rewardResponse.ok) throw new Error("Could not load rewards.json.");
   const rewardData = await rewardResponse.json();
-  const binData = await binResponse.json();
-  if (!Array.isArray(rewardData) || !binData || typeof binData !== "object") throw new Error("The rewards or bins JSON file has the wrong format.");
+  if (!Array.isArray(rewardData)) throw new Error("The rewards JSON file has the wrong format.");
   rewards = rewardData;
-  bins = binData;
 }
 
 function render() {
@@ -172,28 +166,18 @@ function parseSmartBinQR(rawText) {
   }
   if (payload.app !== "smartbin") throw new Error('The QR "app" value must be "smartbin".');
   if (typeof payload.code !== "string" || !/^BIN-\d{4}$/.test(payload.code)) throw new Error('The bin code must look like "BIN-0001".');
-  if (!Number.isSafeInteger(payload.points) || payload.points < -99999 || payload.points > 99999) throw new Error('"points" must be a whole number from 1 to 100.');
+  if (!Number.isSafeInteger(payload.points) || payload.points < 1 || payload.points > 100) throw new Error('"points" must be a whole number from 1 to 100.');
   return payload;
 }
 function claimCode(rawText) {
   if (!user || !account) throw new Error("Log in before scanning a bin.");
   const payload = parseSmartBinQR(rawText);
-  const registered = bins[payload.code];
-  if (!registered) throw new Error("That bin code isn't in bins.json.");
-  if (payload.points !== registered.points) throw new Error("QR points don't match the registered points for this bin.");
-  const now = Date.now();
-  const previous = Number(account.claims[payload.code] || 0);
-  const cooldown = Number(registered.cooldownMinutes ?? 1440);
-  if (!Number.isFinite(cooldown) || cooldown < 1) throw new Error("This bin has an invalid cooldown in bins.json.");
-  const remaining = previous + cooldown * 60000 - now;
-  if (remaining > 0) throw new Error("You've already scanned this bin. Try again in " + Math.ceil(remaining / 60000) + " min.");
-  account.points = Number(account.points || 0) + registered.points;
-  account.lifetime = Number(account.lifetime || 0) + registered.points;
+  account.points = Number(account.points || 0) + payload.points;
+  account.lifetime = Number(account.lifetime || 0) + payload.points;
   account.items = Number(account.items || 0) + 1;
-  account.claims[payload.code] = now;
   saveAccount();
   render();
-  return registered.points;
+  return payload.points;
 }
 function redeem(id) {
   const reward = rewards.find(item => item.id === id);
@@ -294,6 +278,6 @@ window.addEventListener("pagehide", stopScan);
     }
   } catch (error) {
     console.error(error);
-    showMessage("auth-error", "SmartBin couldn't load rewards.json or bins.json. Check that both files are in the project folder.", true);
+    showMessage("auth-error", "SmartBin couldn't load rewards.json. Check that the file is in the project folder.", true);
   }
 })();
