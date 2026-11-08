@@ -44,16 +44,13 @@
       </section>
 
     <section class="card">
-      <h2>Scan a SmartBin code</h2>
-      <p class="muted">Point your camera at the QR code on a SmartBin to add its points to your account. Each bin can be scanned again after its cooldown.</p>
-      <div class="scanner" id="scanner" hidden>
-        <video id="video" playsinline muted></video>
-        <div class="reticle"></div>
-      </div>
-      <div class="row">
-        <button id="scan-start" class="btn" type="button">Open camera</button>
-        <button id="scan-stop" class="btn ghost" type="button" hidden>Stop</button>
-      </div>
+      <h2>Enter a SmartBin code</h2>
+      <p class="muted">Enter the 5-digit code printed on the bin. The first 2 digits identify the bin and the last 3 digits are the points.</p>
+      <form id="code-form">
+        <label for="bin-code">5-digit bin code</label>
+        <input id="bin-code" type="text" inputmode="numeric" pattern="[0-9]{5}" maxlength="5" minlength="5" placeholder="e.g. 01030" autocomplete="off" required>
+        <button class="btn" type="submit">Add points</button>
+      </form>
       <p id="log-msg" class="msg" role="status"></p>
     </section>
 
@@ -71,8 +68,6 @@
   </main>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-<script>window.jsQR||document.write('<script src="https://unpkg.com/jsqr@1.4.0/dist/jsQR.js"><\/script>')</script>
 <script type="module" src="app.js"></script>
 </body>
 </html>
