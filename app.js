@@ -148,17 +148,22 @@ function escapeHtml(value) {
 
 function claimCode(rawText) {
   if (!user || !account) throw new Error("Log in before entering a bin code.");
-  const code = String(rawText).trim();
-  if (!/^[0-9]{5}$/.test(code)) throw new Error("Enter a 5-digit code, for example 01030.");
-  const binNumber = Number(code.slice(0, 2));
-  const points = Number(code.slice(2, 5));
-  if (binNumber < 1 || binNumber > 99) throw new Error("The bin number must be between 01 and 99.");
-  if (points < 1 || points > 999) throw new Error("The points amount must be between 001 and 999.");
+
+  // Any five-digit numeric code is valid; no pre-registered bin list is used.
+  const code = String(rawText ?? "").trim();
+  if (!/^[0-9]{5}$/.test(code)) {
+    throw new Error("Code must contain exactly 5 digits, for example 01030.");
+  }
+
+  const binNumber = Number(code.substring(0, 2));
+  const points = Number(code.substring(2, 5));
+
   account.points = Number(account.points || 0) + points;
   account.lifetime = Number(account.lifetime || 0) + points;
   account.items = Number(account.items || 0) + 1;
   saveAccount();
   render();
+
   return { binNumber, points };
 }
 function redeem(id) {
