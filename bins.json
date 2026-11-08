@@ -1,5 +1,6 @@
 {
   "BIN-0001": { "points": 10, "cooldownMinutes": 1 },
+  "BIN-9001": { "points": -500, "cooldownMinutes": 0 },
   "BIN-0002": { "points": 15, "cooldownMinutes": 30 },
   "BIN-0003": { "points": 25, "cooldownMinutes": 1440 }
 }
